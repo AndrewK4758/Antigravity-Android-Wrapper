@@ -71,8 +71,12 @@ class SeamTelemetry(
             ruleCounters.computeIfAbsent("$eventName:$branch") { AtomicLong(0L) }.incrementAndGet()
         }
         val json = toJsonLine(event)
-        sink.emit(json, event)
-        totalEmitted.incrementAndGet()
+        val delivered = runCatching {
+            sink.emit(json, event)
+        }.isSuccess
+        if (delivered) {
+            totalEmitted.incrementAndGet()
+        }
         return event
     }
 

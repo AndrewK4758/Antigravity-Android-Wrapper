@@ -36,6 +36,7 @@ class RemoteSessionCoordinator(
     private var hasStarted: Boolean = false
     private var lastValidatedUrl: String = IntentUriValidator.DEFAULT_ENTRY_URL
     private var pendingFilePromptId: String? = null
+    private var consecutiveAuthRedirects: Int = 0
 
     fun onStartup(runtimeError: Throwable?, initialIntentUri: String?, hasIntentData: Boolean) {
         if (runtimeError != null) {
@@ -52,9 +53,8 @@ class RemoteSessionCoordinator(
             )
             return
         }
-        if (hasStarted && _uiState.value !is SessionUiState.Error) {
-            return
-        }
+        if (hasStarted && _uiState.value !is SessionUiState.Error) return
+        consecutiveAuthRedirects = 0
         if (hasIntentData && !initialIntentUri.isNullOrBlank()) {
             when (val validation = IntentUriValidator.validateInboundUri(initialIntentUri)) {
                 is UriValidationResult.Valid -> {
@@ -79,17 +79,15 @@ class RemoteSessionCoordinator(
             }
             return
         }
-        val restored = initialSavedUrl?.let { saved ->
-            (IntentUriValidator.validateInboundUri(saved) as? UriValidationResult.Valid)?.normalizedUrl
+        val restored = initialSavedUrl?.let {
+            (IntentUriValidator.validateInboundUri(it) as? UriValidationResult.Valid)?.normalizedUrl
         } ?: IntentUriValidator.DEFAULT_ENTRY_URL
         loadValidatedUrl(restored)
         hasStarted = true
     }
 
     fun onWarmIntent(intentUri: String?, hasIntentData: Boolean) {
-        if (!hasIntentData || intentUri.isNullOrBlank()) {
-            return
-        }
+        if (!hasIntentData || intentUri.isNullOrBlank()) return
         when (val validation = IntentUriValidator.validateInboundUri(intentUri)) {
             is UriValidationResult.Valid -> {
                 recordUriValidationOutcome("Valid")
@@ -97,33 +95,26 @@ class RemoteSessionCoordinator(
             }
             is UriValidationResult.Rejected -> {
                 recordUriValidationOutcome("Rejected")
-                telemetry.recordEvent(
-                    level = TelemetryLevel.WARN,
-                    component = "RemoteSessionCoordinator",
-                    seamType = SeamType.BOUNDARY_FAULT,
-                    eventName = "intent.uri.warm_clobber_prevented",
-                    ruleAc = "AC-4",
-                    attributes = mapOf(
-                        "reason" to validation.reason.name,
-                        "target" to validation.redactedTarget,
-                    ),
+                emitSeam(
+                    TelemetryLevel.WARN,
+                    SeamType.BOUNDARY_FAULT,
+                    "intent.uri.warm_clobber_prevented",
+                    "AC-4",
+                    mapOf("reason" to validation.reason.name, "target" to validation.redactedTarget),
                 )
-                _effects.tryEmit(
-                    UiEffect.ShowNonFatalNotice("Ignored unsupported link (${validation.reason.name})"),
-                )
+                _effects.tryEmit(UiEffect.ShowNonFatalNotice("Ignored unsupported link (${validation.reason.name})"))
             }
         }
     }
 
     fun onNavigationRequest(uri: String?, isNewSession: Boolean): NavigationDecision {
         val decision = NavigationOriginPolicy.classify(uri, isNewSession)
-        telemetry.recordEvent(
-            level = TelemetryLevel.INFO,
-            component = "RemoteSessionCoordinator",
-            seamType = SeamType.RULE_DIVERGENCE,
-            eventName = "nav.policy.decision_distribution",
-            ruleAc = "AC-3,AC-6",
-            attributes = mapOf("branch_taken" to decision.name),
+        emitSeam(
+            TelemetryLevel.INFO,
+            SeamType.RULE_DIVERGENCE,
+            "nav.policy.decision_distribution",
+            "AC-3,AC-6",
+            mapOf("branch_taken" to decision.name),
         )
         when (decision) {
             NavigationDecision.ALLOW_POPUP_IN_HOST -> {
@@ -135,10 +126,7 @@ class RemoteSessionCoordinator(
                 }
             }
             NavigationDecision.HAND_OFF_EXTERNAL -> {
-                val safeUrl = uri?.trim().orEmpty()
-                if (safeUrl.isNotEmpty()) {
-                    _effects.tryEmit(UiEffect.OpenExternalUrl(safeUrl))
-                }
+                uri?.trim()?.takeIf { it.isNotEmpty() }?.let { _effects.tryEmit(UiEffect.OpenExternalUrl(it)) }
             }
             NavigationDecision.ALLOW_IN_SESSION, NavigationDecision.BLOCK -> Unit
         }
@@ -149,49 +137,51 @@ class RemoteSessionCoordinator(
         val current = _uiState.value
         if (current is SessionUiState.Error) return
         val candidate = uri?.trim().takeUnless { it.isNullOrEmpty() }
-        val activeUrl = when {
-            candidate != null && NavigationOriginPolicy.classify(candidate, isNewSession = false) == NavigationDecision.ALLOW_IN_SESSION -> {
-                val validated = IntentUriValidator.validateInboundUri(candidate)
-                if (validated is UriValidationResult.Valid) {
-                    lastValidatedUrl = validated.normalizedUrl
-                    onValidatedUrlChanged(validated.normalizedUrl)
-                }
-                candidate
+        if (candidate != null && isAccountsHost(candidate)) {
+            consecutiveAuthRedirects++
+            if (consecutiveAuthRedirects >= MAX_AUTH_REDIRECTS) {
+                emitSeam(
+                    TelemetryLevel.ERROR,
+                    SeamType.UNSOUND_CONDITION,
+                    "auth.session.context_diverged",
+                    "AC-3",
+                    mapOf(
+                        "precondition" to "Auth redirect sequence must converge",
+                        "expected_state" to "settled_antigravity_session",
+                        "actual_state" to "redirect_loop_$consecutiveAuthRedirects",
+                        "code_location" to "RemoteSessionCoordinator:onLoadStarted",
+                    ),
+                )
+                _uiState.value = SessionUiState.Error(
+                    kind = SessionErrorKind.NETWORK_OR_LOAD_FAILED,
+                    message = "Sign-in redirect loop detected. Tap Retry to reload.",
+                    retryUrl = lastValidatedUrl,
+                )
+                return
             }
-            current is SessionUiState.Loading -> current.activeUrl
-            current is SessionUiState.Active -> current.activeUrl
-            else -> lastValidatedUrl
         }
+        val activeUrl = resolveAllowlistedActiveUrl(candidate, current, persistValidated = true)
         _uiState.value = SessionUiState.Loading(activeUrl = activeUrl, popupOpen = popupOpen)
     }
 
     fun onPageStop(uri: String?, success: Boolean) {
         val current = _uiState.value
-        if (current is SessionUiState.Error) return
-        if (!success) return
+        if (current is SessionUiState.Error || !success) return
         val candidate = uri?.trim().takeUnless { it.isNullOrEmpty() }
-        val activeUrl = when {
-            candidate != null && NavigationOriginPolicy.classify(candidate, isNewSession = false) == NavigationDecision.ALLOW_IN_SESSION -> candidate
-            current is SessionUiState.Loading -> current.activeUrl
-            current is SessionUiState.Active -> current.activeUrl
-            else -> lastValidatedUrl
+        if (candidate != null && !isAccountsHost(candidate) && IntentUriValidator.validateInboundUri(candidate) is UriValidationResult.Valid) {
+            consecutiveAuthRedirects = 0
         }
-        _uiState.value = SessionUiState.Active(
-            activeUrl = activeUrl,
-            canGoBack = canGoBack,
-            popupOpen = popupOpen,
-        )
+        val activeUrl = resolveAllowlistedActiveUrl(candidate, current, persistValidated = false)
+        _uiState.value = SessionUiState.Active(activeUrl = activeUrl, canGoBack = canGoBack, popupOpen = popupOpen)
     }
 
     fun onLoadError(uri: String?, categoryCode: Int, errorCode: Int) {
         val current = _uiState.value
-        val candidateRetry = when {
-            uri != null && IntentUriValidator.validateInboundUri(uri) is UriValidationResult.Valid ->
-                (IntentUriValidator.validateInboundUri(uri) as UriValidationResult.Valid).normalizedUrl
-            current is SessionUiState.Loading && IntentUriValidator.validateInboundUri(current.activeUrl) is UriValidationResult.Valid ->
-                current.activeUrl
-            else -> lastValidatedUrl
+        val uriValid = uri?.let { IntentUriValidator.validateInboundUri(it) as? UriValidationResult.Valid }
+        val loadingValid = (current as? SessionUiState.Loading)?.activeUrl?.let {
+            IntentUriValidator.validateInboundUri(it) as? UriValidationResult.Valid
         }
+        val candidateRetry = uriValid?.normalizedUrl ?: loadingValid?.normalizedUrl ?: lastValidatedUrl
         transitionToError(
             kind = SessionErrorKind.NETWORK_OR_LOAD_FAILED,
             message = "Unable to load session page (category=$categoryCode, code=$errorCode)",
@@ -208,12 +198,11 @@ class RemoteSessionCoordinator(
     }
 
     fun onRetry() {
-        val current = _uiState.value
-        val target = when (current) {
-            is SessionUiState.Error -> {
-                val valid = IntentUriValidator.validateInboundUri(current.retryUrl)
-                if (valid is UriValidationResult.Valid) valid.normalizedUrl else IntentUriValidator.DEFAULT_ENTRY_URL
-            }
+        consecutiveAuthRedirects = 0
+        val target = when (val current = _uiState.value) {
+            is SessionUiState.Error ->
+                (IntentUriValidator.validateInboundUri(current.retryUrl) as? UriValidationResult.Valid)?.normalizedUrl
+                    ?: IntentUriValidator.DEFAULT_ENTRY_URL
             is SessionUiState.Loading -> current.activeUrl
             is SessionUiState.Active -> current.activeUrl
             SessionUiState.Initializing -> lastValidatedUrl
@@ -236,8 +225,7 @@ class RemoteSessionCoordinator(
             onPopupClosed()
             return
         }
-        val current = _uiState.value
-        if (current !is SessionUiState.Error && canGoBack) {
+        if (_uiState.value !is SessionUiState.Error && canGoBack) {
             port.goBack()
             return
         }
@@ -254,53 +242,85 @@ class RemoteSessionCoordinator(
     }
 
     fun onFilePrompt(requestId: String, mimeTypes: List<String>, allowMultiple: Boolean) {
-        val existing = pendingFilePromptId
-        if (existing != null) {
-            port.cancelFilePrompt(existing)
-            telemetry.recordEvent(
-                level = TelemetryLevel.ERROR,
-                component = "RemoteSessionCoordinator",
-                seamType = SeamType.DELTA_AUDIT_GAP,
-                eventName = "prompt.file.callback_orphaned",
-                ruleAc = "AC-6",
-                attributes = mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
-            )
-        }
+        onSessionReset()
         pendingFilePromptId = requestId
-        _effects.tryEmit(
-            UiEffect.LaunchDocumentPicker(
-                requestId = requestId,
-                mimeTypes = mimeTypes,
-                allowMultiple = allowMultiple,
-            ),
-        )
+        _effects.tryEmit(UiEffect.LaunchDocumentPicker(requestId, mimeTypes, allowMultiple))
     }
 
     fun onFilePickerResult(requestId: String, uris: List<String>?) {
         if (pendingFilePromptId != requestId) return
         pendingFilePromptId = null
-        if (uris.isNullOrEmpty()) {
-            port.cancelFilePrompt(requestId)
-        } else {
-            port.completeFilePrompt(requestId, uris)
-        }
+        if (uris.isNullOrEmpty()) port.cancelFilePrompt(requestId) else port.completeFilePrompt(requestId, uris)
     }
 
     fun onSessionReset() {
         val existing = pendingFilePromptId ?: return
         pendingFilePromptId = null
         port.cancelFilePrompt(existing)
-        telemetry.recordEvent(
-            level = TelemetryLevel.ERROR,
-            component = "RemoteSessionCoordinator",
-            seamType = SeamType.DELTA_AUDIT_GAP,
-            eventName = "prompt.file.callback_orphaned",
-            ruleAc = "AC-6",
-            attributes = mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
+        emitSeam(
+            TelemetryLevel.ERROR,
+            SeamType.DELTA_AUDIT_GAP,
+            "prompt.file.callback_orphaned",
+            "AC-6",
+            mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
         )
     }
 
+    fun loadUriGuarded(rawUri: String): Boolean {
+        return when (val validation = IntentUriValidator.validateInboundUri(rawUri)) {
+            is UriValidationResult.Valid -> {
+                loadValidatedUrl(validation.normalizedUrl)
+                true
+            }
+            is UriValidationResult.Rejected -> {
+                emitSeam(
+                    TelemetryLevel.ERROR,
+                    SeamType.UNSOUND_CONDITION,
+                    "intent.uri.unvalidated_load_blocked",
+                    "AC-4",
+                    mapOf(
+                        "precondition" to "Only validated antigravity HTTPS URIs may enter primary loadUri",
+                        "expected_state" to "UriValidationResult.Valid",
+                        "actual_state" to validation.reason.name,
+                        "code_location" to "RemoteSessionCoordinator:loadUriGuarded",
+                        "target" to validation.redactedTarget,
+                    ),
+                )
+                false
+            }
+        }
+    }
+
+    fun verifySessionAttachedOnStart(hasAttachedSession: Boolean) {
+        if (_uiState.value is SessionUiState.Active && !hasAttachedSession) {
+            emitSeam(
+                TelemetryLevel.ERROR,
+                SeamType.DELTA_AUDIT_GAP,
+                "lifecycle.config.session_reattach_missing",
+                "AC-5",
+                mapOf("expected_checkpoint" to "GeckoView.setSession", "gap_type" to "side_effect_missing"),
+            )
+        }
+    }
+
     fun pendingFilePromptRequestId(): String? = pendingFilePromptId
+
+    private fun resolveAllowlistedActiveUrl(candidate: String?, current: SessionUiState, persistValidated: Boolean): String {
+        if (candidate != null && NavigationOriginPolicy.classify(candidate, isNewSession = false) == NavigationDecision.ALLOW_IN_SESSION) {
+            if (persistValidated) {
+                (IntentUriValidator.validateInboundUri(candidate) as? UriValidationResult.Valid)?.let {
+                    lastValidatedUrl = it.normalizedUrl
+                    onValidatedUrlChanged(it.normalizedUrl)
+                }
+            }
+            return candidate
+        }
+        return when (current) {
+            is SessionUiState.Loading -> current.activeUrl
+            is SessionUiState.Active -> current.activeUrl
+            else -> lastValidatedUrl
+        }
+    }
 
     private fun transitionToError(
         kind: SessionErrorKind,
@@ -310,29 +330,17 @@ class RemoteSessionCoordinator(
         attributes: Map<String, String>,
     ) {
         val beforeCount = telemetry.emittedCount()
-        telemetry.recordEvent(
-            level = TelemetryLevel.ERROR,
-            component = "RemoteSessionCoordinator",
-            seamType = SeamType.BOUNDARY_FAULT,
-            eventName = eventName,
-            ruleAc = "AC-7",
-            attributes = attributes,
-        )
+        emitSeam(TelemetryLevel.ERROR, SeamType.BOUNDARY_FAULT, eventName, "AC-7", attributes)
         if (telemetry.emittedCount() == beforeCount) {
-            telemetry.recordEvent(
-                level = TelemetryLevel.ERROR,
-                component = "RemoteSessionCoordinator",
-                seamType = SeamType.DELTA_AUDIT_GAP,
-                eventName = "error.ui.diagnostic_missing",
-                ruleAc = "AC-7",
-                attributes = mapOf("gap_type" to "side_effect_missing"),
+            emitSeam(
+                TelemetryLevel.ERROR,
+                SeamType.DELTA_AUDIT_GAP,
+                "error.ui.diagnostic_missing",
+                "AC-7",
+                mapOf("gap_type" to "side_effect_missing"),
             )
         }
-        _uiState.value = SessionUiState.Error(
-            kind = kind,
-            message = message,
-            retryUrl = retryUrl,
-        )
+        _uiState.value = SessionUiState.Error(kind = kind, message = message, retryUrl = retryUrl)
     }
 
     private fun loadValidatedUrl(validatedUrl: String) {
@@ -343,25 +351,45 @@ class RemoteSessionCoordinator(
     }
 
     private fun recordUriValidationOutcome(branch: String) {
-        telemetry.recordEvent(
-            level = if (branch == "Valid") TelemetryLevel.INFO else TelemetryLevel.WARN,
-            component = "RemoteSessionCoordinator",
-            seamType = SeamType.RULE_DIVERGENCE,
-            eventName = "intent.uri.validation_outcome",
-            ruleAc = "AC-4",
-            attributes = mapOf("branch_taken" to branch),
+        emitSeam(
+            if (branch == "Valid") TelemetryLevel.INFO else TelemetryLevel.WARN,
+            SeamType.RULE_DIVERGENCE,
+            "intent.uri.validation_outcome",
+            "AC-4",
+            mapOf("branch_taken" to branch),
         )
     }
 
+    private fun emitSeam(
+        level: TelemetryLevel,
+        seamType: SeamType,
+        eventName: String,
+        ruleAc: String,
+        attributes: Map<String, String>,
+    ) {
+        telemetry.recordEvent(level, "RemoteSessionCoordinator", seamType, eventName, ruleAc, attributes)
+    }
+
+    private fun isAccountsHost(url: String): Boolean =
+        url.trim().lowercase().startsWith("https://accounts.google.com")
+
     internal fun setStateForTest(state: SessionUiState) {
         _uiState.value = state
-        if (state is SessionUiState.Active) {
-            canGoBack = state.canGoBack
-            popupOpen = state.popupOpen
-            hasStarted = true
-        } else if (state is SessionUiState.Loading) {
-            popupOpen = state.popupOpen
-            hasStarted = true
+        when (state) {
+            is SessionUiState.Active -> {
+                canGoBack = state.canGoBack
+                popupOpen = state.popupOpen
+                hasStarted = true
+            }
+            is SessionUiState.Loading -> {
+                popupOpen = state.popupOpen
+                hasStarted = true
+            }
+            else -> Unit
         }
+    }
+
+    private companion object {
+        const val MAX_AUTH_REDIRECTS = 6
     }
 }
