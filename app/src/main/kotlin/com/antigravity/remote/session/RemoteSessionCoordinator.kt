@@ -294,18 +294,14 @@ class RemoteSessionCoordinator(
     fun verifySessionAttachedOnStart(hasAttachedSession: Boolean) {
         if (_uiState.value is SessionUiState.Active && !hasAttachedSession) {
             emitSeam(
-                TelemetryLevel.ERROR,
-                SeamType.DELTA_AUDIT_GAP,
-                "lifecycle.config.session_reattach_missing",
-                "AC-5",
+                TelemetryLevel.ERROR, SeamType.DELTA_AUDIT_GAP,
+                "lifecycle.config.session_reattach_missing", "AC-5",
                 mapOf("expected_checkpoint" to "GeckoView.setSession", "gap_type" to "side_effect_missing"),
             )
         }
     }
 
-    fun emitNotice(message: String) {
-        _effects.tryEmit(UiEffect.ShowNonFatalNotice(message))
-    }
+    fun emitNotice(message: String) { _effects.tryEmit(UiEffect.ShowNonFatalNotice(message)) }
 
     fun pendingFilePromptRequestId(): String? = pendingFilePromptId
 
@@ -313,8 +309,10 @@ class RemoteSessionCoordinator(
         if (candidate != null && NavigationOriginPolicy.classify(candidate, isNewSession = false) == NavigationDecision.ALLOW_IN_SESSION) {
             if (persistValidated) {
                 (IntentUriValidator.validateInboundUri(candidate) as? UriValidationResult.Valid)?.let {
-                    lastValidatedUrl = it.normalizedUrl
-                    onValidatedUrlChanged(it.normalizedUrl)
+                    if (lastValidatedUrl != it.normalizedUrl) {
+                        lastValidatedUrl = it.normalizedUrl
+                        onValidatedUrlChanged(it.normalizedUrl)
+                    }
                 }
             }
             return candidate
@@ -327,21 +325,14 @@ class RemoteSessionCoordinator(
     }
 
     private fun transitionToError(
-        kind: SessionErrorKind,
-        message: String,
-        retryUrl: String,
-        eventName: String,
-        attributes: Map<String, String>,
+        kind: SessionErrorKind, message: String, retryUrl: String, eventName: String, attributes: Map<String, String>,
     ) {
         val beforeCount = telemetry.emittedCount()
         emitSeam(TelemetryLevel.ERROR, SeamType.BOUNDARY_FAULT, eventName, "AC-7", attributes)
         if (telemetry.emittedCount() == beforeCount) {
             emitSeam(
-                TelemetryLevel.ERROR,
-                SeamType.DELTA_AUDIT_GAP,
-                "error.ui.diagnostic_missing",
-                "AC-7",
-                mapOf("gap_type" to "side_effect_missing"),
+                TelemetryLevel.ERROR, SeamType.DELTA_AUDIT_GAP,
+                "error.ui.diagnostic_missing", "AC-7", mapOf("gap_type" to "side_effect_missing"),
             )
         }
         _uiState.value = SessionUiState.Error(kind = kind, message = message, retryUrl = retryUrl)
@@ -357,43 +348,24 @@ class RemoteSessionCoordinator(
     private fun recordUriValidationOutcome(branch: String) {
         emitSeam(
             if (branch == "Valid") TelemetryLevel.INFO else TelemetryLevel.WARN,
-            SeamType.RULE_DIVERGENCE,
-            "intent.uri.validation_outcome",
-            "AC-4",
-            mapOf("branch_taken" to branch),
+            SeamType.RULE_DIVERGENCE, "intent.uri.validation_outcome", "AC-4", mapOf("branch_taken" to branch),
         )
     }
 
     private fun emitSeam(
-        level: TelemetryLevel,
-        seamType: SeamType,
-        eventName: String,
-        ruleAc: String,
-        attributes: Map<String, String>,
-    ) {
-        telemetry.recordEvent(level, "RemoteSessionCoordinator", seamType, eventName, ruleAc, attributes)
-    }
+        level: TelemetryLevel, seamType: SeamType, eventName: String, ruleAc: String, attributes: Map<String, String>,
+    ) = telemetry.recordEvent(level, "RemoteSessionCoordinator", seamType, eventName, ruleAc, attributes)
 
-    private fun isAccountsHost(url: String): Boolean =
-        url.trim().lowercase().startsWith("https://accounts.google.com")
+    private fun isAccountsHost(url: String): Boolean = url.trim().lowercase().startsWith("https://accounts.google.com")
 
     internal fun setStateForTest(state: SessionUiState) {
         _uiState.value = state
         when (state) {
-            is SessionUiState.Active -> {
-                canGoBack = state.canGoBack
-                popupOpen = state.popupOpen
-                hasStarted = true
-            }
-            is SessionUiState.Loading -> {
-                popupOpen = state.popupOpen
-                hasStarted = true
-            }
+            is SessionUiState.Active -> { canGoBack = state.canGoBack; popupOpen = state.popupOpen; hasStarted = true }
+            is SessionUiState.Loading -> { popupOpen = state.popupOpen; hasStarted = true }
             else -> Unit
         }
     }
 
-    private companion object {
-        const val MAX_AUTH_REDIRECTS = 6
-    }
+    private companion object { const val MAX_AUTH_REDIRECTS = 6 }
 }
