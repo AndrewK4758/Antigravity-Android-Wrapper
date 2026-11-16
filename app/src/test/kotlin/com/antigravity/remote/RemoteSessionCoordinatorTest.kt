@@ -262,6 +262,59 @@ class RemoteSessionCoordinatorTest {
         }
     }
 
+    @Test
+    fun s4_4_file_prompt_launches_picker_and_completes_on_selection() = runTest {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.setStateForTest(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/r/inst-1", canGoBack = false),
+        )
+        val emittedEffects = mutableListOf<UiEffect>()
+        val collectJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { emittedEffects.add(it) }
+        }
+
+        coordinator.onFilePrompt("prompt-1", listOf("image/*", "text/plain"), allowMultiple = false)
+
+        assertEquals(
+            listOf(UiEffect.LaunchDocumentPicker("prompt-1", listOf("image/*", "text/plain"), allowMultiple = false)),
+            emittedEffects,
+        )
+        assertEquals("prompt-1", coordinator.pendingFilePromptRequestId())
+
+        coordinator.onFilePickerResult("prompt-1", listOf("content://docs/file1.txt"))
+
+        assertEquals(listOf("prompt-1" to listOf("content://docs/file1.txt")), port.completedPrompts)
+        assertEquals(null, coordinator.pendingFilePromptRequestId())
+        collectJob.cancel()
+    }
+
+    @Test
+    fun s4_5_cancelled_file_picker_dismisses_pending_prompt_and_allows_next_prompt() = runTest {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.setStateForTest(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/r/inst-1", canGoBack = false),
+        )
+        val emittedEffects = mutableListOf<UiEffect>()
+        val collectJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { emittedEffects.add(it) }
+        }
+
+        coordinator.onFilePrompt("prompt-2", listOf("*/*"), allowMultiple = true)
+        assertEquals("prompt-2", coordinator.pendingFilePromptRequestId())
+
+        coordinator.onFilePickerResult("prompt-2", null)
+
+        assertEquals(listOf("prompt-2"), port.cancelledPrompts)
+        assertEquals(null, coordinator.pendingFilePromptRequestId())
+
+        coordinator.onFilePrompt("prompt-3", listOf("image/*"), allowMultiple = false)
+        assertEquals("prompt-3", coordinator.pendingFilePromptRequestId())
+        assertEquals(2, emittedEffects.count { it is UiEffect.LaunchDocumentPicker })
+        collectJob.cancel()
+    }
+
     private class FakeBrowserSessionPort : BrowserSessionPort {
         val loadedUrls = mutableListOf<String>()
         var reloadCount = 0

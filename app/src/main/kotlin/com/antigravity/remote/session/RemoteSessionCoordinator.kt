@@ -35,6 +35,7 @@ class RemoteSessionCoordinator(
     private var canGoBack: Boolean = false
     private var hasStarted: Boolean = false
     private var lastValidatedUrl: String = IntentUriValidator.DEFAULT_ENTRY_URL
+    private var pendingFilePromptId: String? = null
 
     fun onStartup(runtimeError: Throwable?, initialIntentUri: String?, hasIntentData: Boolean) {
         if (runtimeError != null) {
@@ -190,6 +191,55 @@ class RemoteSessionCoordinator(
             else -> current
         }
     }
+
+    fun onFilePrompt(requestId: String, mimeTypes: List<String>, allowMultiple: Boolean) {
+        val existing = pendingFilePromptId
+        if (existing != null) {
+            port.cancelFilePrompt(existing)
+            telemetry.recordEvent(
+                level = TelemetryLevel.ERROR,
+                component = "RemoteSessionCoordinator",
+                seamType = SeamType.DELTA_AUDIT_GAP,
+                eventName = "prompt.file.callback_orphaned",
+                ruleAc = "AC-6",
+                attributes = mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
+            )
+        }
+        pendingFilePromptId = requestId
+        _effects.tryEmit(
+            UiEffect.LaunchDocumentPicker(
+                requestId = requestId,
+                mimeTypes = mimeTypes,
+                allowMultiple = allowMultiple,
+            ),
+        )
+    }
+
+    fun onFilePickerResult(requestId: String, uris: List<String>?) {
+        if (pendingFilePromptId != requestId) return
+        pendingFilePromptId = null
+        if (uris.isNullOrEmpty()) {
+            port.cancelFilePrompt(requestId)
+        } else {
+            port.completeFilePrompt(requestId, uris)
+        }
+    }
+
+    fun onSessionReset() {
+        val existing = pendingFilePromptId ?: return
+        pendingFilePromptId = null
+        port.cancelFilePrompt(existing)
+        telemetry.recordEvent(
+            level = TelemetryLevel.ERROR,
+            component = "RemoteSessionCoordinator",
+            seamType = SeamType.DELTA_AUDIT_GAP,
+            eventName = "prompt.file.callback_orphaned",
+            ruleAc = "AC-6",
+            attributes = mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
+        )
+    }
+
+    fun pendingFilePromptRequestId(): String? = pendingFilePromptId
 
     private fun loadValidatedUrl(validatedUrl: String) {
         lastValidatedUrl = validatedUrl
