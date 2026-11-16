@@ -56,8 +56,8 @@ class SessionViewModel(
             return
         }
         val isActionView = intent?.action == Intent.ACTION_VIEW
-        val intentUri = if (isActionView) intent?.dataString else null
-        val hasIntentData = isActionView && intent?.data != null
+        val intentUri = if (isActionView) intent.dataString else null
+        val hasIntentData = isActionView && intent.data != null
 
         val runtimeResult = app.ensureGeckoRuntime()
         val runtime = runtimeResult.getOrNull()
