@@ -1,5 +1,10 @@
 package com.antigravity.remote.telemetry
 
+import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+
 enum class SeamType {
     UNSOUND_CONDITION,
     DELTA_AUDIT_GAP,
@@ -33,7 +38,11 @@ interface SeamTelemetrySink {
 
 class SeamTelemetry(
     private val sink: SeamTelemetrySink = NoOpTelemetrySink,
+    private val serviceName: String = "antigravity-remote-android",
 ) {
+    private val totalEmitted = AtomicLong(0L)
+    private val ruleCounters = ConcurrentHashMap<String, AtomicLong>()
+
     fun recordEvent(
         level: TelemetryLevel,
         component: String,
@@ -41,8 +50,67 @@ class SeamTelemetry(
         eventName: String,
         ruleAc: String,
         attributes: Map<String, String> = emptyMap(),
-    ) {
-        // Implemented incrementally as telemetry and observability scenarios execute.
+    ): SeamEvent {
+        val event = SeamEvent(
+            timestamp = Instant.now().toString(),
+            level = level,
+            traceId = UUID.randomUUID().toString().replace("-", ""),
+            spanId = UUID.randomUUID().toString().replace("-", "").take(16),
+            requestId = UUID.randomUUID().toString(),
+            service = serviceName,
+            component = component,
+            seamType = seamType,
+            eventName = eventName,
+            ruleAc = ruleAc,
+            attributes = attributes,
+        )
+        if (seamType == SeamType.RULE_DIVERGENCE) {
+            val branch = event.attributes["branch_taken"] ?: "default"
+            ruleCounters.computeIfAbsent("$eventName:$branch") { AtomicLong(0L) }.incrementAndGet()
+        }
+        val json = toJsonLine(event)
+        sink.emit(json, event)
+        totalEmitted.incrementAndGet()
+        return event
+    }
+
+    fun emittedCount(): Long = totalEmitted.get()
+
+    fun ruleBranchCount(eventName: String, branchTaken: String): Long =
+        ruleCounters["$eventName:$branchTaken"]?.get() ?: 0L
+
+    private fun toJsonLine(event: SeamEvent): String {
+        val fields = linkedMapOf(
+            "timestamp" to event.timestamp,
+            "level" to event.level.name,
+            "trace_id" to event.traceId,
+            "span_id" to event.spanId,
+            "request_id" to event.requestId,
+            "service" to event.service,
+            "component" to event.component,
+            "seam_type" to event.seamType.name,
+            "event_name" to event.eventName,
+            "requirement_id" to event.ruleAc,
+        )
+        for ((k, v) in event.attributes) {
+            fields[k] = v
+        }
+        return fields.entries.joinToString(prefix = "{", postfix = "}", separator = ",") { (k, v) ->
+            "\"${escapeJson(k)}\":\"${escapeJson(v)}\""
+        }
+    }
+
+    private fun escapeJson(value: String): String = buildString(value.length) {
+        for (ch in value) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(ch)
+            }
+        }
     }
 
     private object NoOpTelemetrySink : SeamTelemetrySink {

@@ -39,7 +39,18 @@ class RemoteSessionCoordinator(
 
     fun onStartup(runtimeError: Throwable?, initialIntentUri: String?, hasIntentData: Boolean) {
         if (runtimeError != null) {
-            throw NotImplementedError("Runtime startup error handling not yet implemented")
+            transitionToError(
+                kind = SessionErrorKind.RUNTIME_INIT_FAILED,
+                message = "Browser engine failed to initialize: ${runtimeError::class.simpleName}",
+                retryUrl = IntentUriValidator.DEFAULT_ENTRY_URL,
+                eventName = "gecko.runtime.init_or_load_fault",
+                attributes = mapOf(
+                    "violated_seam" to "gecko.runtime.init",
+                    "violation_type" to "runtime_init_exception",
+                    "error_type" to (runtimeError::class.simpleName ?: "Throwable"),
+                ),
+            )
+            return
         }
         if (hasStarted && _uiState.value !is SessionUiState.Error) {
             return
@@ -52,7 +63,18 @@ class RemoteSessionCoordinator(
                     hasStarted = true
                 }
                 is UriValidationResult.Rejected -> {
-                    throw NotImplementedError("Cold invalid URI error handling not yet implemented")
+                    recordUriValidationOutcome("Rejected")
+                    transitionToError(
+                        kind = SessionErrorKind.INVALID_COLD_URI,
+                        message = "Blocked unsupported startup link (${validation.reason.name})",
+                        retryUrl = IntentUriValidator.DEFAULT_ENTRY_URL,
+                        eventName = "gecko.runtime.init_or_load_fault",
+                        attributes = mapOf(
+                            "violated_seam" to "intent.uri.cold_admission",
+                            "violation_type" to validation.reason.name,
+                            "target" to validation.redactedTarget,
+                        ),
+                    )
                 }
             }
             return
@@ -161,6 +183,45 @@ class RemoteSessionCoordinator(
         )
     }
 
+    fun onLoadError(uri: String?, categoryCode: Int, errorCode: Int) {
+        val current = _uiState.value
+        val candidateRetry = when {
+            uri != null && IntentUriValidator.validateInboundUri(uri) is UriValidationResult.Valid ->
+                (IntentUriValidator.validateInboundUri(uri) as UriValidationResult.Valid).normalizedUrl
+            current is SessionUiState.Loading && IntentUriValidator.validateInboundUri(current.activeUrl) is UriValidationResult.Valid ->
+                current.activeUrl
+            else -> lastValidatedUrl
+        }
+        transitionToError(
+            kind = SessionErrorKind.NETWORK_OR_LOAD_FAILED,
+            message = "Unable to load session page (category=$categoryCode, code=$errorCode)",
+            retryUrl = candidateRetry,
+            eventName = "gecko.runtime.init_or_load_fault",
+            attributes = mapOf(
+                "violated_seam" to "gecko.session.load",
+                "violation_type" to "load_error",
+                "category_code" to categoryCode.toString(),
+                "error_code" to errorCode.toString(),
+                "target" to IntentUriValidator.redactForLog(uri ?: candidateRetry),
+            ),
+        )
+    }
+
+    fun onRetry() {
+        val current = _uiState.value
+        val target = when (current) {
+            is SessionUiState.Error -> {
+                val valid = IntentUriValidator.validateInboundUri(current.retryUrl)
+                if (valid is UriValidationResult.Valid) valid.normalizedUrl else IntentUriValidator.DEFAULT_ENTRY_URL
+            }
+            is SessionUiState.Loading -> current.activeUrl
+            is SessionUiState.Active -> current.activeUrl
+            SessionUiState.Initializing -> lastValidatedUrl
+        }
+        loadValidatedUrl(target)
+        hasStarted = true
+    }
+
     fun onCanGoBackChanged(canGoBack: Boolean) {
         this.canGoBack = canGoBack
         val current = _uiState.value
@@ -240,6 +301,39 @@ class RemoteSessionCoordinator(
     }
 
     fun pendingFilePromptRequestId(): String? = pendingFilePromptId
+
+    private fun transitionToError(
+        kind: SessionErrorKind,
+        message: String,
+        retryUrl: String,
+        eventName: String,
+        attributes: Map<String, String>,
+    ) {
+        val beforeCount = telemetry.emittedCount()
+        telemetry.recordEvent(
+            level = TelemetryLevel.ERROR,
+            component = "RemoteSessionCoordinator",
+            seamType = SeamType.BOUNDARY_FAULT,
+            eventName = eventName,
+            ruleAc = "AC-7",
+            attributes = attributes,
+        )
+        if (telemetry.emittedCount() == beforeCount) {
+            telemetry.recordEvent(
+                level = TelemetryLevel.ERROR,
+                component = "RemoteSessionCoordinator",
+                seamType = SeamType.DELTA_AUDIT_GAP,
+                eventName = "error.ui.diagnostic_missing",
+                ruleAc = "AC-7",
+                attributes = mapOf("gap_type" to "side_effect_missing"),
+            )
+        }
+        _uiState.value = SessionUiState.Error(
+            kind = kind,
+            message = message,
+            retryUrl = retryUrl,
+        )
+    }
 
     private fun loadValidatedUrl(validatedUrl: String) {
         lastValidatedUrl = validatedUrl
