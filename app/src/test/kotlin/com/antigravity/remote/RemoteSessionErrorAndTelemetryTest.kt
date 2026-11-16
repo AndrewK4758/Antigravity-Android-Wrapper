@@ -123,4 +123,47 @@ class RemoteSessionErrorAndTelemetryTest {
         assertEquals(0, port.goBackCount)
         collectJob.cancel()
     }
+
+    @Test
+    fun s3_5_telemetry_and_url_persistence_never_capture_cookies_or_query_secrets() {
+        val port = RecordingBrowserSessionPort()
+        val sink = RecordingTelemetrySink()
+        val telemetry = SeamTelemetry(sink)
+        val savedUrls = mutableListOf<String>()
+        val coordinator = RemoteSessionCoordinator(
+            port = port,
+            telemetry = telemetry,
+            onValidatedUrlChanged = { savedUrls.add(it) },
+        )
+
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+        coordinator.onLoadStarted("https://accounts.google.com/ServiceLogin?token=secret123&code=oauth999")
+        coordinator.onLoadError(
+            uri = "https://accounts.google.com/ServiceLogin?token=secret123",
+            categoryCode = 2,
+            errorCode = -1,
+        )
+        telemetry.recordEvent(
+            level = com.antigravity.remote.telemetry.TelemetryLevel.WARN,
+            component = "NavigationDelegate",
+            seamType = SeamType.BOUNDARY_FAULT,
+            eventName = "gecko.runtime.init_or_load_fault",
+            ruleAc = "AC-3",
+            attributes = mapOf(
+                "target" to "https://accounts.google.com/ServiceLogin?token=secret123",
+                "Cookie" to "SID=xyz999; HSID=abc888",
+                "Set-Cookie" to "LSID=topsecret456; HttpOnly",
+                "Authorization" to "Bearer jwt-token-777",
+            ),
+        )
+
+        val allJson = sink.jsonLines.joinToString("\n")
+        for (forbidden in listOf("secret123", "oauth999", "SID=xyz999", "HSID=abc888", "LSID=topsecret456", "jwt-token-777")) {
+            org.junit.Assert.assertFalse("Telemetry leaked forbidden secret: $forbidden", allJson.contains(forbidden))
+        }
+        org.junit.Assert.assertFalse(
+            "Saved URL persistence must never store accounts.google.com auth URLs",
+            savedUrls.any { it.contains("accounts.google.com") || it.contains("secret123") },
+        )
+    }
 }

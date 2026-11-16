@@ -1,5 +1,6 @@
 package com.antigravity.remote.telemetry
 
+import com.antigravity.remote.policy.IntentUriValidator
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -51,6 +52,7 @@ class SeamTelemetry(
         ruleAc: String,
         attributes: Map<String, String> = emptyMap(),
     ): SeamEvent {
+        val sanitized = sanitizeAttributes(attributes)
         val event = SeamEvent(
             timestamp = Instant.now().toString(),
             level = level,
@@ -62,7 +64,7 @@ class SeamTelemetry(
             seamType = seamType,
             eventName = eventName,
             ruleAc = ruleAc,
-            attributes = attributes,
+            attributes = sanitized,
         )
         if (seamType == SeamType.RULE_DIVERGENCE) {
             val branch = event.attributes["branch_taken"] ?: "default"
@@ -72,6 +74,53 @@ class SeamTelemetry(
         sink.emit(json, event)
         totalEmitted.incrementAndGet()
         return event
+    }
+
+    private fun sanitizeAttributes(attributes: Map<String, String>): Map<String, String> {
+        if (attributes.isEmpty()) return emptyMap()
+        val out = linkedMapOf<String, String>()
+        for ((rawKey, rawVal) in attributes) {
+            val keyLower = rawKey.lowercase()
+            val cleanVal = when {
+                sensitiveKeyTokens.any { keyLower.contains(it) } -> "[REDACTED]"
+                looksLikeUrl(rawVal) -> IntentUriValidator.redactForLog(rawVal)
+                else -> redactInlineSecrets(rawVal)
+            }
+            out[rawKey] = cleanVal
+        }
+        return out
+    }
+
+    private fun looksLikeUrl(value: String): Boolean {
+        val lower = value.trim().lowercase()
+        return lower.startsWith("https://") ||
+            lower.startsWith("http://") ||
+            lower.startsWith("intent://") ||
+            lower.startsWith("file://") ||
+            lower.startsWith("javascript:") ||
+            lower.startsWith("data:")
+    }
+
+    private fun redactInlineSecrets(value: String): String {
+        var sanitized = inlineUrlRegex.replace(value) { IntentUriValidator.redactForLog(it.value) }
+        sanitized = inlineAuthRegex.replace(sanitized) { "${it.groupValues[1]}=[REDACTED]" }
+        return sanitized
+    }
+
+    private companion object {
+        val sensitiveKeyTokens = listOf(
+            "cookie",
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "authorization",
+            "credential",
+            "bearer",
+            "session_id",
+        )
+        val inlineUrlRegex = Regex("https?://\\S+")
+        val inlineAuthRegex = Regex("(?i)\\b(cookie|set-cookie|authorization|token|secret|password|sid|hsid|lsid)\\s*[:=]\\s*[^;\\s]+")
     }
 
     fun emittedCount(): Long = totalEmitted.get()
