@@ -1,6 +1,10 @@
 package com.antigravity.remote.session
 
+import com.antigravity.remote.policy.IntentUriValidator
+import com.antigravity.remote.policy.UriValidationResult
 import com.antigravity.remote.telemetry.SeamTelemetry
+import com.antigravity.remote.telemetry.SeamType
+import com.antigravity.remote.telemetry.TelemetryLevel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,11 +28,53 @@ class RemoteSessionCoordinator(
     )
     val effects: SharedFlow<UiEffect> = _effects.asSharedFlow()
 
+    private var popupOpen: Boolean = false
+
     fun onWarmIntent(intentUri: String?, hasIntentData: Boolean) {
         if (!hasIntentData || intentUri.isNullOrBlank()) {
             return
         }
-        throw NotImplementedError("Non-empty warm intent routing not yet implemented")
+        when (val validation = IntentUriValidator.validateInboundUri(intentUri)) {
+            is UriValidationResult.Valid -> {
+                telemetry.recordEvent(
+                    level = TelemetryLevel.INFO,
+                    component = "RemoteSessionCoordinator",
+                    seamType = SeamType.RULE_DIVERGENCE,
+                    eventName = "intent.uri.validation_outcome",
+                    ruleAc = "AC-4",
+                    attributes = mapOf("branch_taken" to "Valid"),
+                )
+                _uiState.value = SessionUiState.Loading(
+                    activeUrl = validation.normalizedUrl,
+                    popupOpen = popupOpen,
+                )
+                port.loadUri(validation.normalizedUrl)
+            }
+            is UriValidationResult.Rejected -> {
+                telemetry.recordEvent(
+                    level = TelemetryLevel.WARN,
+                    component = "RemoteSessionCoordinator",
+                    seamType = SeamType.RULE_DIVERGENCE,
+                    eventName = "intent.uri.validation_outcome",
+                    ruleAc = "AC-4",
+                    attributes = mapOf("branch_taken" to "Rejected"),
+                )
+                telemetry.recordEvent(
+                    level = TelemetryLevel.WARN,
+                    component = "RemoteSessionCoordinator",
+                    seamType = SeamType.BOUNDARY_FAULT,
+                    eventName = "intent.uri.warm_clobber_prevented",
+                    ruleAc = "AC-4",
+                    attributes = mapOf(
+                        "reason" to validation.reason.name,
+                        "target" to validation.redactedTarget,
+                    ),
+                )
+                _effects.tryEmit(
+                    UiEffect.ShowNonFatalNotice("Ignored unsupported link (${validation.reason.name})"),
+                )
+            }
+        }
     }
 
     fun onLoadStarted(uri: String?) {
