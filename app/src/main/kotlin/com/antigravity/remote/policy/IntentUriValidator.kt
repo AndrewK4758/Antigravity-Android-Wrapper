@@ -71,6 +71,7 @@ object IntentUriValidator {
     fun redactForLog(rawUri: String?): String {
         val trimmed = rawUri?.trim().orEmpty()
         if (trimmed.isEmpty()) return "<empty>"
+        if (alreadyRedactedUrlRegex.matches(trimmed)) return trimmed
         return try {
             val parsed = URI(trimmed)
             val scheme = parsed.scheme?.lowercase() ?: return "<malformed>"
@@ -88,6 +89,8 @@ object IntentUriValidator {
             "<malformed>"
         }
     }
+
+    private val alreadyRedactedUrlRegex = Regex("^https?://[^/?#\\s]+(/[^?#\\s]*)?\\?keys=\\[[^\\]]+]$")
 
     private fun isAllowedPath(rawPath: String): Boolean {
         if (rawPath.isEmpty() || rawPath == "/") return true

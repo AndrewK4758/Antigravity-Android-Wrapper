@@ -55,4 +55,13 @@ class IntentUriValidatorTest {
             )
         }
     }
+
+    @Test
+    fun redact_for_log_is_idempotent_and_preserves_redacted_query_key_names() {
+        val once = IntentUriValidator.redactForLog("https://antigravity.google.com/admin/settings?secret=topsecret123")
+        val twice = IntentUriValidator.redactForLog(once)
+
+        assertEquals("https://antigravity.google.com/admin/settings?keys=[secret]", once)
+        assertEquals(once, twice)
+    }
 }
