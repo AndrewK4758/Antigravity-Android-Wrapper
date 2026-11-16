@@ -1,6 +1,7 @@
 package com.antigravity.remote
 
 import com.antigravity.remote.session.RemoteSessionCoordinator
+import com.antigravity.remote.session.SessionDisplayTracker
 import com.antigravity.remote.session.SessionUiState
 import com.antigravity.remote.session.UiEffect
 import com.antigravity.remote.telemetry.SeamTelemetry
@@ -73,6 +74,25 @@ class LifecycleAndExternalHandoffTest {
         )
         assertTrue(emittedEffects.any { it is UiEffect.ShowNonFatalNotice })
         collectJob.cancel()
+    }
+
+    @Test
+    fun popup_session_waits_until_open_to_bind_and_restores_primary_on_close() {
+        val tracker = SessionDisplayTracker<String>()
+        tracker.onPrimaryCreated("primary-1")
+        assertEquals("primary-1", tracker.currentDisplay())
+
+        tracker.onPopupCreated("popup-1")
+        assertEquals("primary-1", tracker.currentDisplay())
+        assertFalse(tracker.activatePopupIfMatches("popup-1", isOpen = false))
+        assertEquals("primary-1", tracker.currentDisplay())
+
+        assertTrue(tracker.activatePopupIfMatches("popup-1", isOpen = true))
+        assertEquals("popup-1", tracker.currentDisplay())
+        assertFalse(tracker.activatePopupIfMatches("popup-1", isOpen = true))
+
+        assertEquals("popup-1", tracker.clearPopup())
+        assertEquals("primary-1", tracker.currentDisplay())
     }
 
     private class FakeSessionHostView(

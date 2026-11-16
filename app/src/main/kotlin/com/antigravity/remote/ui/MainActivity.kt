@@ -140,6 +140,13 @@ class MainActivity : AppCompatActivity() {
                     viewModel.uiState.collect { state -> renderState(state) }
                 }
                 launch {
+                    viewModel.displaySession.collect { session ->
+                        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                            GeckoViewAttachmentHelper.rebindIfNeeded(geckoViewPort, session)
+                        }
+                    }
+                }
+                launch {
                     viewModel.effects.collect { effect -> handleEffect(effect) }
                 }
             }

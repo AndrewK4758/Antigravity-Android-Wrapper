@@ -7,8 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import com.antigravity.remote.AntigravityRemoteApp
 import com.antigravity.remote.policy.NavigationDecision
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
@@ -32,8 +34,10 @@ class SessionViewModel(
     private val pendingPrompts = LinkedHashMap<String, PromptDelegate.FilePrompt>()
     private val pendingPromptResults = LinkedHashMap<String, GeckoResult<PromptDelegate.PromptResponse>>()
 
-    private var primarySession: GeckoSession? = null
-    private var popupSession: GeckoSession? = null
+    private val displayTracker = SessionDisplayTracker<GeckoSession>()
+    private val _displaySession = MutableStateFlow<GeckoSession?>(null)
+    val displaySession: StateFlow<GeckoSession?> = _displaySession.asStateFlow()
+
     private var latestLocation: String? = null
     private var startupDispatched: Boolean = false
 
@@ -71,7 +75,7 @@ class SessionViewModel(
         coordinator.onWarmIntent(intent.dataString, intent.data != null)
     }
 
-    fun currentDisplaySession(): GeckoSession? = popupSession ?: primarySession
+    fun currentDisplaySession(): GeckoSession? = displayTracker.currentDisplay()
 
     fun verifySessionAttachedOnStart(hasAttachedSession: Boolean) {
         coordinator.verifySessionAttachedOnStart(hasAttachedSession)
@@ -96,11 +100,12 @@ class SessionViewModel(
     }
 
     private fun ensurePrimarySession(runtime: GeckoRuntime) {
-        if (primarySession != null) return
+        if (displayTracker.primarySession() != null) return
         app.requireRuntimeForSession()
         val session = createConfiguredSession()
         session.open(runtime)
-        primarySession = session
+        displayTracker.onPrimaryCreated(session)
+        _displaySession.value = displayTracker.currentDisplay()
     }
 
     private fun createConfiguredSession(): GeckoSession {
@@ -127,13 +132,14 @@ class SessionViewModel(
             perms: List<PermissionDelegate.ContentPermission>,
             hasUserGesture: Boolean,
         ) {
-            if (session === primarySession && !url.isNullOrBlank()) {
+            promotePendingPopupIfOpen(session)
+            if (session === displayTracker.primarySession() && !url.isNullOrBlank()) {
                 latestLocation = url
             }
         }
 
         override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
-            if (session === primarySession) {
+            if (session === displayTracker.primarySession()) {
                 coordinator.onCanGoBackChanged(canGoBack)
             }
         }
@@ -142,6 +148,7 @@ class SessionViewModel(
             session: GeckoSession,
             request: NavigationDelegate.LoadRequest,
         ): GeckoResult<AllowOrDeny> {
+            promotePendingPopupIfOpen(session)
             val decision = coordinator.onNavigationRequest(request.uri, isNewSession = false)
             val allow = decision == NavigationDecision.ALLOW_IN_SESSION
             return GeckoResult.fromValue(if (allow) AllowOrDeny.ALLOW else AllowOrDeny.DENY)
@@ -154,7 +161,7 @@ class SessionViewModel(
             }
             closePopupSession()
             val child = createConfiguredSession()
-            popupSession = child
+            displayTracker.onPopupCreated(child)
             return GeckoResult.fromValue(child)
         }
 
@@ -163,9 +170,9 @@ class SessionViewModel(
             uri: String?,
             error: WebRequestError,
         ): GeckoResult<String>? {
-            if (session === primarySession) {
+            if (session === displayTracker.primarySession()) {
                 coordinator.onLoadError(uri ?: latestLocation, error.category, error.code)
-            } else if (session === popupSession) {
+            } else if (displayTracker.hasPopupSession(session)) {
                 closePopupSession()
                 coordinator.onPopupClosed()
                 coordinator.emitNotice("Sign-in popup failed to load (error ${error.code})")
@@ -176,14 +183,16 @@ class SessionViewModel(
 
     private fun createProgressDelegate(): ProgressDelegate = object : ProgressDelegate {
         override fun onPageStart(session: GeckoSession, url: String) {
-            if (session === primarySession) {
+            promotePendingPopupIfOpen(session)
+            if (session === displayTracker.primarySession()) {
                 latestLocation = url
                 coordinator.onLoadStarted(url)
             }
         }
 
         override fun onPageStop(session: GeckoSession, success: Boolean) {
-            if (session === primarySession) {
+            promotePendingPopupIfOpen(session)
+            if (session === displayTracker.primarySession()) {
                 coordinator.onPageStop(latestLocation, success)
             }
         }
@@ -207,7 +216,7 @@ class SessionViewModel(
 
     private fun createContentDelegate(): ContentDelegate = object : ContentDelegate {
         override fun onCloseRequest(session: GeckoSession) {
-            if (session === popupSession) {
+            if (displayTracker.hasPopupSession(session)) {
                 closePopupSession()
                 coordinator.onPopupClosed()
             }
@@ -222,27 +231,35 @@ class SessionViewModel(
         override fun onKill(session: GeckoSession) = handleSessionTermination(session)
     }
 
+    private fun promotePendingPopupIfOpen(session: GeckoSession) {
+        if (session === displayTracker.pendingPopupSession() &&
+            displayTracker.activatePopupIfMatches(session, isOpen = session.isOpen)
+        ) {
+            _displaySession.value = displayTracker.currentDisplay()
+        }
+    }
+
     private fun handleSessionTermination(session: GeckoSession) {
-        if (session === popupSession) {
+        if (displayTracker.hasPopupSession(session)) {
             closePopupSession()
             coordinator.onPopupClosed()
             return
         }
-        primarySession?.close()
-        primarySession = null
+        closePopupSession()
+        displayTracker.clearPrimary()?.close()
+        _displaySession.value = displayTracker.currentDisplay()
         coordinator.onLoadError(latestLocation, -1, -1)
     }
 
     private fun closePopupSession() {
-        popupSession?.close()
-        popupSession = null
+        displayTracker.clearPopup()?.close()
+        _displaySession.value = displayTracker.currentDisplay()
     }
 
     override fun onCleared() {
         coordinator.onSessionReset()
-        closePopupSession()
-        primarySession?.close()
-        primarySession = null
+        displayTracker.clearAll().forEach { it.close() }
+        _displaySession.value = null
         super.onCleared()
     }
 
@@ -250,15 +267,15 @@ class SessionViewModel(
         override fun loadUri(url: String) {
             val runtime = app.ensureGeckoRuntime().getOrNull() ?: return
             ensurePrimarySession(runtime)
-            primarySession?.loadUri(url)
+            displayTracker.primarySession()?.loadUri(url)
         }
 
         override fun reload() {
-            primarySession?.reload()
+            displayTracker.primarySession()?.reload()
         }
 
         override fun goBack() {
-            primarySession?.goBack()
+            displayTracker.primarySession()?.goBack()
         }
 
         override fun closePopup() {
