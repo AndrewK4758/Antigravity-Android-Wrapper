@@ -1,5 +1,6 @@
 [versions]
 agp = "9.4.0"
+kotlin = "2.4.21"
 geckoview = "160.0.20261104181552"
 coreKtx = "1.15.0"
 appcompat = "1.7.0"
@@ -21,3 +22,4 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
