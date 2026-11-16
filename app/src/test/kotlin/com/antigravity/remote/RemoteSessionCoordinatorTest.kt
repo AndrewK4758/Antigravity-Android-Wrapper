@@ -135,6 +135,71 @@ class RemoteSessionCoordinatorTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun s1_2_cold_launcher_start_loads_default_url_and_transitions_loading_to_active() {
+        val port = FakeBrowserSessionPort()
+        val persistedUrls = mutableListOf<String>()
+        val coordinator = RemoteSessionCoordinator(
+            port = port,
+            telemetry = SeamTelemetry(),
+            onValidatedUrlChanged = { persistedUrls.add(it) },
+        )
+
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+
+        assertEquals(listOf("https://antigravity.google.com/"), port.loadedUrls)
+        assertEquals(SessionUiState.Loading("https://antigravity.google.com/"), coordinator.uiState.value)
+        assertEquals(listOf("https://antigravity.google.com/"), persistedUrls)
+
+        coordinator.onPageStop("https://antigravity.google.com/", success = true)
+
+        assertEquals(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/", canGoBack = false),
+            coordinator.uiState.value,
+        )
+    }
+
+    @Test
+    fun s1_3_saved_validated_url_restores_across_process_death_without_new_intent() {
+        val port = FakeBrowserSessionPort()
+        val saved = "https://antigravity.google.com/r/inst-42?p=c%2Fconv-9"
+        val coordinator = RemoteSessionCoordinator(
+            port = port,
+            telemetry = SeamTelemetry(),
+            initialSavedUrl = saved,
+        )
+
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+
+        assertEquals(listOf(saved), port.loadedUrls)
+        assertEquals(SessionUiState.Loading(saved), coordinator.uiState.value)
+    }
+
+    @Test
+    fun s2_1_cold_action_view_overrides_saved_url_with_validated_deep_link() {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(
+            port = port,
+            telemetry = SeamTelemetry(),
+            initialSavedUrl = "https://antigravity.google.com/r/old-inst",
+        )
+
+        coordinator.onStartup(
+            runtimeError = null,
+            initialIntentUri = "https://antigravity.google.com/r/dev-box?p=c%2Fabc123",
+            hasIntentData = true,
+        )
+
+        assertEquals(
+            listOf("https://antigravity.google.com/r/dev-box?p=c%2Fabc123"),
+            port.loadedUrls,
+        )
+        assertEquals(
+            SessionUiState.Loading("https://antigravity.google.com/r/dev-box?p=c%2Fabc123"),
+            coordinator.uiState.value,
+        )
+    }
+
     private class FakeBrowserSessionPort : BrowserSessionPort {
         val loadedUrls = mutableListOf<String>()
         var reloadCount = 0
