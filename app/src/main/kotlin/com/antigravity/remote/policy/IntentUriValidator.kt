@@ -58,7 +58,8 @@ object IntentUriValidator {
         }
 
         val rawPath = parsed.rawPath.orEmpty()
-        if (!isAllowedPath(rawPath)) {
+        val decodedPath = parsed.path.orEmpty()
+        if (!isAllowedPath(rawPath) || !isAllowedPath(decodedPath)) {
             return UriValidationResult.Rejected(UriRejectionReason.DISALLOWED_PATH, redactForLog(trimmed))
         }
 

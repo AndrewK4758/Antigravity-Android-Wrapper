@@ -166,4 +166,136 @@ class RemoteSessionErrorAndTelemetryTest {
             savedUrls.any { it.contains("accounts.google.com") || it.contains("secret123") },
         )
     }
+
+    @Test
+    fun warm_invalid_intent_emitted_while_stopped_buffers_until_effect_collection_starts() = runTest {
+        val port = RecordingBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+
+        coordinator.onWarmIntent("https://evil.example.com/r/x", hasIntentData = true)
+
+        val collected = mutableListOf<UiEffect>()
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { collected.add(it) }
+        }
+        assertTrue(
+            "Expected buffered ShowNonFatalNotice, got $collected",
+            collected.any { it is UiEffect.ShowNonFatalNotice },
+        )
+        job.cancel()
+    }
+
+    @Test
+    fun primary_load_error_while_popup_open_resets_popup_so_back_exits_and_retry_starts_clean() = runTest {
+        val port = RecordingBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+        coordinator.onNavigationRequest("https://accounts.google.com/ServiceLogin", isNewSession = true)
+
+        coordinator.onLoadError("https://antigravity.google.com/", categoryCode = 2, errorCode = -1)
+        assertEquals(1, port.closePopupCount)
+
+        val effects = mutableListOf<UiEffect>()
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { effects.add(it) }
+        }
+        coordinator.onBackPressed()
+        assertEquals(listOf(UiEffect.CloseApp), effects)
+
+        coordinator.onRetry()
+        val loading = coordinator.uiState.value as SessionUiState.Loading
+        assertEquals(false, loading.popupOpen)
+        job.cancel()
+    }
+
+    @Test
+    fun on_startup_is_one_shot_and_never_replays_over_error_state_after_rotation() {
+        val port = RecordingBrowserSessionPort()
+        val sink = RecordingTelemetrySink()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry(sink))
+
+        coordinator.onStartup(
+            runtimeError = null,
+            initialIntentUri = "https://antigravity.google.com/admin/settings",
+            hasIntentData = true,
+        )
+        assertEquals(SessionErrorKind.INVALID_COLD_URI, (coordinator.uiState.value as SessionUiState.Error).kind)
+
+        coordinator.onRetry()
+        coordinator.onLoadStarted("https://antigravity.google.com/r/work")
+        coordinator.onPageStop("https://antigravity.google.com/r/work", success = true)
+        coordinator.onLoadError("https://antigravity.google.com/r/work", categoryCode = 2, errorCode = -2)
+        val countBeforeRotation = port.loadedUrls.size
+
+        coordinator.onStartup(
+            runtimeError = null,
+            initialIntentUri = "https://antigravity.google.com/admin/settings",
+            hasIntentData = true,
+        )
+
+        val err = coordinator.uiState.value as SessionUiState.Error
+        assertEquals(SessionErrorKind.NETWORK_OR_LOAD_FAILED, err.kind)
+        assertEquals("https://antigravity.google.com/r/work", err.retryUrl)
+        assertEquals(countBeforeRotation, port.loadedUrls.size)
+    }
+
+    @Test
+    fun runtime_init_failure_ignores_repeated_startup_on_rotation_and_supports_error_retry() {
+        val port = RecordingBrowserSessionPort()
+        val sink = RecordingTelemetrySink()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry(sink))
+
+        coordinator.onStartup(
+            runtimeError = UnsatisfiedLinkError("libxul.so missing"),
+            initialIntentUri = null,
+            hasIntentData = false,
+        )
+        val initialFaultCount = sink.events.count { it.eventName == "gecko.runtime.init_or_load_fault" }
+
+        coordinator.onStartup(
+            runtimeError = UnsatisfiedLinkError("libxul.so missing"),
+            initialIntentUri = null,
+            hasIntentData = false,
+        )
+        assertEquals(initialFaultCount, sink.events.count { it.eventName == "gecko.runtime.init_or_load_fault" })
+
+        coordinator.onRetry(runtimeError = IllegalStateException("still broken"))
+        assertEquals(SessionErrorKind.RUNTIME_INIT_FAILED, (coordinator.uiState.value as SessionUiState.Error).kind)
+        assertEquals(initialFaultCount + 1, sink.events.count { it.eventName == "gecko.runtime.init_or_load_fault" })
+
+        coordinator.onRetry()
+        assertEquals(listOf(IntentUriValidator.DEFAULT_ENTRY_URL), port.loadedUrls)
+    }
+
+    @Test
+    fun download_requests_delegate_external_urls_and_surface_notice_for_self_or_blob_uris() = runTest {
+        val port = RecordingBrowserSessionPort()
+        val sink = RecordingTelemetrySink()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry(sink))
+
+        coordinator.onDownloadRequested("https://storage.googleapis.com/bucket/logs.zip")
+        coordinator.onDownloadRequested("https://antigravity.google.com/r/demo/export.zip")
+        coordinator.onDownloadRequested("blob:https://antigravity.google.com/1234-5678")
+
+        val effects = mutableListOf<UiEffect>()
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { effects.add(it) }
+        }
+        assertEquals(
+            listOf(
+                UiEffect.OpenExternalUrl("https://storage.googleapis.com/bucket/logs.zip"),
+                UiEffect.ShowNonFatalNotice("Direct file download is not supported in this standalone session"),
+                UiEffect.ShowNonFatalNotice("Direct file download is not supported in this standalone session"),
+            ),
+            effects,
+        )
+        assertEquals(
+            2,
+            sink.events.count {
+                it.seamType == SeamType.BOUNDARY_FAULT && it.eventName == "download.response.unhandled"
+            },
+        )
+        job.cancel()
+    }
 }

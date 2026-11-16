@@ -56,6 +56,8 @@ class CompatibilityContractTest {
         assertTrue("MainActivity must include displayCutout insets", mainActivitySource.contains("displayCutout()"))
         assertTrue("MainActivity must configure dark system bar styles", mainActivitySource.contains("SystemBarStyle.dark"))
         assertTrue("MainActivity must attach BasicSelectionActionDelegate", mainActivitySource.contains("BasicSelectionActionDelegate"))
+        assertTrue("MainActivity must clear selection before release", mainActivitySource.contains("clearSelection()"))
+        assertTrue("MainActivity must handle missing document picker", mainActivitySource.contains("ActivityNotFoundException"))
     }
 
     private fun resolveModuleDir(): File {

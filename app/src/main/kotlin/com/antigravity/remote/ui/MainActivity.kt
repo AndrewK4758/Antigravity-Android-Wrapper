@@ -1,5 +1,6 @@
 package com.antigravity.remote.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -61,7 +62,9 @@ class MainActivity : AppCompatActivity() {
         override fun currentAttachedSession(): GeckoSession? = geckoView.session
 
         override fun releaseAttachedSession() {
-            geckoView.session?.selectionActionDelegate = null
+            val active = geckoView.session
+            (active?.selectionActionDelegate as? BasicSelectionActionDelegate)?.clearSelection()
+            active?.selectionActionDelegate = null
             geckoView.releaseSession()
         }
 
@@ -187,10 +190,16 @@ class MainActivity : AppCompatActivity() {
             is UiEffect.LaunchDocumentPicker -> {
                 pendingPickerRequestId = effect.requestId
                 val mimeArray = if (effect.mimeTypes.isEmpty()) arrayOf("*/*") else effect.mimeTypes.toTypedArray()
-                if (effect.allowMultiple) {
-                    multiFileLauncher.launch(mimeArray)
-                } else {
-                    singleFileLauncher.launch(mimeArray)
+                try {
+                    if (effect.allowMultiple) {
+                        multiFileLauncher.launch(mimeArray)
+                    } else {
+                        singleFileLauncher.launch(mimeArray)
+                    }
+                } catch (_: ActivityNotFoundException) {
+                    pendingPickerRequestId = null
+                    viewModel.onFilePickerResult(effect.requestId, null)
+                    showNotice("No file picker available on this device")
                 }
             }
             is UiEffect.ShowNonFatalNotice -> showNotice(effect.message)

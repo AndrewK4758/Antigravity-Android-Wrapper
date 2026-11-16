@@ -190,4 +190,21 @@ class ObservabilitySeamsTest {
             },
         )
     }
+
+    @Test
+    fun os_uri_validation_outcome_tracks_valid_and_rejected_branches() {
+        val port = RecordingBrowserSessionPort()
+        val sink = RecordingTelemetrySink()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry(sink))
+
+        coordinator.onStartup(runtimeError = null, initialIntentUri = null, hasIntentData = false)
+        coordinator.onWarmIntent("https://antigravity.google.com/r/inst-2", hasIntentData = true)
+        coordinator.onWarmIntent("https://evil.example.com/r/inst-2", hasIntentData = true)
+
+        val validationEvents = sink.events.filter {
+            it.seamType == SeamType.RULE_DIVERGENCE && it.eventName == "intent.uri.validation_outcome"
+        }
+        assertEquals(1, validationEvents.count { it.attributes["branch_taken"] == "Valid" })
+        assertEquals(1, validationEvents.count { it.attributes["branch_taken"] == "Rejected" })
+    }
 }

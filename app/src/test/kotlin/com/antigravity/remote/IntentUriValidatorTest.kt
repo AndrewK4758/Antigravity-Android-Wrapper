@@ -33,6 +33,7 @@ class IntentUriValidatorTest {
             "https://user:secret@antigravity.google.com/r/inst-1?token=abc" to UriRejectionReason.MALFORMED_URI,
             "https://antigravity.google.com/admin/settings" to UriRejectionReason.DISALLOWED_PATH,
             "https://antigravity.google.com/r/../admin/settings" to UriRejectionReason.DISALLOWED_PATH,
+            "https://antigravity.google.com/r/%2e%2e/admin/settings" to UriRejectionReason.DISALLOWED_PATH,
         )
 
         for ((rawUri, expectedReason) in cases) {

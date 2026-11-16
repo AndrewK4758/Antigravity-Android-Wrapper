@@ -7,13 +7,12 @@ import com.antigravity.remote.policy.UriValidationResult
 import com.antigravity.remote.telemetry.SeamTelemetry
 import com.antigravity.remote.telemetry.SeamType
 import com.antigravity.remote.telemetry.TelemetryLevel
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 
 class RemoteSessionCoordinator(
     private val port: BrowserSessionPort,
@@ -24,12 +23,8 @@ class RemoteSessionCoordinator(
     private val _uiState = MutableStateFlow<SessionUiState>(SessionUiState.Initializing)
     val uiState: StateFlow<SessionUiState> = _uiState.asStateFlow()
 
-    private val _effects = MutableSharedFlow<UiEffect>(
-        replay = 0,
-        extraBufferCapacity = 16,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    val effects: SharedFlow<UiEffect> = _effects.asSharedFlow()
+    private val _effects = Channel<UiEffect>(Channel.BUFFERED)
+    val effects: Flow<UiEffect> = _effects.receiveAsFlow()
 
     private var popupOpen: Boolean = false
     private var canGoBack: Boolean = false
@@ -39,28 +34,18 @@ class RemoteSessionCoordinator(
     private var consecutiveAuthRedirects: Int = 0
 
     fun onStartup(runtimeError: Throwable?, initialIntentUri: String?, hasIntentData: Boolean) {
+        if (hasStarted) return
+        hasStarted = true
+        consecutiveAuthRedirects = 0
         if (runtimeError != null) {
-            transitionToError(
-                kind = SessionErrorKind.RUNTIME_INIT_FAILED,
-                message = "Browser engine failed to initialize: ${runtimeError::class.simpleName}",
-                retryUrl = IntentUriValidator.DEFAULT_ENTRY_URL,
-                eventName = "gecko.runtime.init_or_load_fault",
-                attributes = mapOf(
-                    "violated_seam" to "gecko.runtime.init",
-                    "violation_type" to "runtime_init_exception",
-                    "error_type" to (runtimeError::class.simpleName ?: "Throwable"),
-                ),
-            )
+            reportRuntimeInitFailure(runtimeError)
             return
         }
-        if (hasStarted && _uiState.value !is SessionUiState.Error) return
-        consecutiveAuthRedirects = 0
         if (hasIntentData && !initialIntentUri.isNullOrBlank()) {
             when (val validation = IntentUriValidator.validateInboundUri(initialIntentUri)) {
                 is UriValidationResult.Valid -> {
                     recordUriValidationOutcome("Valid")
-                    loadValidatedUrl(validation.normalizedUrl)
-                    hasStarted = true
+                    loadUriGuarded(validation.normalizedUrl)
                 }
                 is UriValidationResult.Rejected -> {
                     recordUriValidationOutcome("Rejected")
@@ -68,12 +53,9 @@ class RemoteSessionCoordinator(
                         kind = SessionErrorKind.INVALID_COLD_URI,
                         message = "Blocked unsupported startup link (${validation.reason.name})",
                         retryUrl = IntentUriValidator.DEFAULT_ENTRY_URL,
-                        eventName = "gecko.runtime.init_or_load_fault",
-                        attributes = mapOf(
-                            "violated_seam" to "intent.uri.cold_admission",
-                            "violation_type" to validation.reason.name,
-                            "target" to validation.redactedTarget,
-                        ),
+                        violatedSeam = "intent.uri.cold_admission",
+                        violationType = validation.reason.name,
+                        "target" to validation.redactedTarget,
                     )
                 }
             }
@@ -82,8 +64,7 @@ class RemoteSessionCoordinator(
         val restored = initialSavedUrl?.let {
             (IntentUriValidator.validateInboundUri(it) as? UriValidationResult.Valid)?.normalizedUrl
         } ?: IntentUriValidator.DEFAULT_ENTRY_URL
-        loadValidatedUrl(restored)
-        hasStarted = true
+        loadUriGuarded(restored)
     }
 
     fun onWarmIntent(intentUri: String?, hasIntentData: Boolean) {
@@ -91,7 +72,8 @@ class RemoteSessionCoordinator(
         when (val validation = IntentUriValidator.validateInboundUri(intentUri)) {
             is UriValidationResult.Valid -> {
                 recordUriValidationOutcome("Valid")
-                loadValidatedUrl(validation.normalizedUrl)
+                consecutiveAuthRedirects = 0
+                loadUriGuarded(validation.normalizedUrl)
             }
             is UriValidationResult.Rejected -> {
                 recordUriValidationOutcome("Rejected")
@@ -102,7 +84,7 @@ class RemoteSessionCoordinator(
                     "AC-4",
                     mapOf("reason" to validation.reason.name, "target" to validation.redactedTarget),
                 )
-                _effects.tryEmit(UiEffect.ShowNonFatalNotice("Ignored unsupported link (${validation.reason.name})"))
+                sendEffect(UiEffect.ShowNonFatalNotice("Ignored unsupported link (${validation.reason.name})"))
             }
         }
     }
@@ -126,18 +108,33 @@ class RemoteSessionCoordinator(
                 }
             }
             NavigationDecision.HAND_OFF_EXTERNAL -> {
-                uri?.trim()?.takeIf { it.isNotEmpty() }?.let { _effects.tryEmit(UiEffect.OpenExternalUrl(it)) }
+                uri?.trim()?.takeIf { it.isNotEmpty() }?.let { sendEffect(UiEffect.OpenExternalUrl(it)) }
             }
             NavigationDecision.ALLOW_IN_SESSION, NavigationDecision.BLOCK -> Unit
         }
         return decision
     }
 
+    fun onDownloadRequested(uri: String?) {
+        if (NavigationOriginPolicy.classify(uri, isNewSession = false) == NavigationDecision.HAND_OFF_EXTERNAL) {
+            uri?.trim()?.takeIf { it.isNotEmpty() }?.let { sendEffect(UiEffect.OpenExternalUrl(it)) }
+            return
+        }
+        emitSeam(
+            TelemetryLevel.WARN,
+            SeamType.BOUNDARY_FAULT,
+            "download.response.unhandled",
+            "AC-6",
+            mapOf("target" to IntentUriValidator.redactForLog(uri)),
+        )
+        sendEffect(UiEffect.ShowNonFatalNotice("Direct file download is not supported in this standalone session"))
+    }
+
     fun onLoadStarted(uri: String?) {
         val current = _uiState.value
         if (current is SessionUiState.Error) return
         val candidate = uri?.trim().takeUnless { it.isNullOrEmpty() }
-        if (candidate != null && isAccountsHost(candidate)) {
+        if (candidate != null && NavigationOriginPolicy.isAccountsHost(candidate)) {
             consecutiveAuthRedirects++
             if (consecutiveAuthRedirects >= MAX_AUTH_REDIRECTS) {
                 emitSeam(
@@ -152,6 +149,7 @@ class RemoteSessionCoordinator(
                         "code_location" to "RemoteSessionCoordinator:onLoadStarted",
                     ),
                 )
+                closePopupIfOpen()
                 _uiState.value = SessionUiState.Error(
                     kind = SessionErrorKind.NETWORK_OR_LOAD_FAILED,
                     message = "Sign-in redirect loop detected. Tap Retry to reload.",
@@ -168,7 +166,10 @@ class RemoteSessionCoordinator(
         val current = _uiState.value
         if (current is SessionUiState.Error || !success) return
         val candidate = uri?.trim().takeUnless { it.isNullOrEmpty() }
-        if (candidate != null && !isAccountsHost(candidate) && IntentUriValidator.validateInboundUri(candidate) is UriValidationResult.Valid) {
+        if (candidate != null &&
+            !NavigationOriginPolicy.isAccountsHost(candidate) &&
+            IntentUriValidator.validateInboundUri(candidate) is UriValidationResult.Valid
+        ) {
             consecutiveAuthRedirects = 0
         }
         val activeUrl = resolveAllowlistedActiveUrl(candidate, current, persistValidated = false)
@@ -186,19 +187,21 @@ class RemoteSessionCoordinator(
             kind = SessionErrorKind.NETWORK_OR_LOAD_FAILED,
             message = "Unable to load session page (category=$categoryCode, code=$errorCode)",
             retryUrl = candidateRetry,
-            eventName = "gecko.runtime.init_or_load_fault",
-            attributes = mapOf(
-                "violated_seam" to "gecko.session.load",
-                "violation_type" to "load_error",
-                "category_code" to categoryCode.toString(),
-                "error_code" to errorCode.toString(),
-                "target" to IntentUriValidator.redactForLog(uri ?: candidateRetry),
-            ),
+            violatedSeam = "gecko.session.load",
+            violationType = "load_error",
+            "category_code" to categoryCode.toString(),
+            "error_code" to errorCode.toString(),
+            "target" to IntentUriValidator.redactForLog(uri ?: candidateRetry),
         )
     }
 
-    fun onRetry() {
+    fun onRetry(runtimeError: Throwable? = null) {
+        hasStarted = true
         consecutiveAuthRedirects = 0
+        if (runtimeError != null) {
+            reportRuntimeInitFailure(runtimeError)
+            return
+        }
         val target = when (val current = _uiState.value) {
             is SessionUiState.Error ->
                 (IntentUriValidator.validateInboundUri(current.retryUrl) as? UriValidationResult.Valid)?.normalizedUrl
@@ -207,8 +210,7 @@ class RemoteSessionCoordinator(
             is SessionUiState.Active -> current.activeUrl
             SessionUiState.Initializing -> lastValidatedUrl
         }
-        loadValidatedUrl(target)
-        hasStarted = true
+        loadUriGuarded(target)
     }
 
     fun onCanGoBackChanged(canGoBack: Boolean) {
@@ -220,16 +222,20 @@ class RemoteSessionCoordinator(
     }
 
     fun onBackPressed() {
+        if (_uiState.value is SessionUiState.Error) {
+            sendEffect(UiEffect.CloseApp)
+            return
+        }
         if (popupOpen) {
             port.closePopup()
             onPopupClosed()
             return
         }
-        if (_uiState.value !is SessionUiState.Error && canGoBack) {
+        if (canGoBack) {
             port.goBack()
             return
         }
-        _effects.tryEmit(UiEffect.CloseApp)
+        sendEffect(UiEffect.CloseApp)
     }
 
     fun onPopupClosed() {
@@ -244,7 +250,7 @@ class RemoteSessionCoordinator(
     fun onFilePrompt(requestId: String, mimeTypes: List<String>, allowMultiple: Boolean) {
         onSessionReset()
         pendingFilePromptId = requestId
-        _effects.tryEmit(UiEffect.LaunchDocumentPicker(requestId, mimeTypes, allowMultiple))
+        sendEffect(UiEffect.LaunchDocumentPicker(requestId, mimeTypes, allowMultiple))
     }
 
     fun onFilePickerResult(requestId: String, uris: List<String>?) {
@@ -269,15 +275,16 @@ class RemoteSessionCoordinator(
     fun loadUriGuarded(rawUri: String): Boolean {
         return when (val validation = IntentUriValidator.validateInboundUri(rawUri)) {
             is UriValidationResult.Valid -> {
-                loadValidatedUrl(validation.normalizedUrl)
+                val normalized = validation.normalizedUrl
+                lastValidatedUrl = normalized
+                onValidatedUrlChanged(normalized)
+                _uiState.value = SessionUiState.Loading(activeUrl = normalized, popupOpen = popupOpen)
+                port.loadUri(normalized)
                 true
             }
             is UriValidationResult.Rejected -> {
                 emitSeam(
-                    TelemetryLevel.ERROR,
-                    SeamType.UNSOUND_CONDITION,
-                    "intent.uri.unvalidated_load_blocked",
-                    "AC-4",
+                    TelemetryLevel.ERROR, SeamType.UNSOUND_CONDITION, "intent.uri.unvalidated_load_blocked", "AC-4",
                     mapOf(
                         "precondition" to "Only validated antigravity HTTPS URIs may enter primary loadUri",
                         "expected_state" to "UriValidationResult.Valid",
@@ -301,7 +308,7 @@ class RemoteSessionCoordinator(
         }
     }
 
-    fun emitNotice(message: String) { _effects.tryEmit(UiEffect.ShowNonFatalNotice(message)) }
+    fun emitNotice(message: String) { sendEffect(UiEffect.ShowNonFatalNotice(message)) }
 
     fun pendingFilePromptRequestId(): String? = pendingFilePromptId
 
@@ -324,11 +331,37 @@ class RemoteSessionCoordinator(
         }
     }
 
+    private fun reportRuntimeInitFailure(runtimeError: Throwable) {
+        transitionToError(
+            kind = SessionErrorKind.RUNTIME_INIT_FAILED,
+            message = "Browser engine failed to initialize: ${runtimeError::class.simpleName}",
+            retryUrl = IntentUriValidator.DEFAULT_ENTRY_URL,
+            violatedSeam = "gecko.runtime.init",
+            violationType = "runtime_init_exception",
+            "error_type" to (runtimeError::class.simpleName ?: "Throwable"),
+        )
+    }
+
+    private fun closePopupIfOpen() {
+        if (popupOpen) {
+            port.closePopup()
+            popupOpen = false
+        }
+    }
+
     private fun transitionToError(
-        kind: SessionErrorKind, message: String, retryUrl: String, eventName: String, attributes: Map<String, String>,
+        kind: SessionErrorKind,
+        message: String,
+        retryUrl: String,
+        violatedSeam: String,
+        violationType: String,
+        vararg extraAttributes: Pair<String, String>,
     ) {
+        closePopupIfOpen()
+        val attributes = linkedMapOf("violated_seam" to violatedSeam, "violation_type" to violationType)
+        extraAttributes.forEach { (k, v) -> attributes[k] = v }
         val beforeCount = telemetry.emittedCount()
-        emitSeam(TelemetryLevel.ERROR, SeamType.BOUNDARY_FAULT, eventName, "AC-7", attributes)
+        emitSeam(TelemetryLevel.ERROR, SeamType.BOUNDARY_FAULT, "gecko.runtime.init_or_load_fault", "AC-7", attributes)
         if (telemetry.emittedCount() == beforeCount) {
             emitSeam(
                 TelemetryLevel.ERROR, SeamType.DELTA_AUDIT_GAP,
@@ -338,12 +371,7 @@ class RemoteSessionCoordinator(
         _uiState.value = SessionUiState.Error(kind = kind, message = message, retryUrl = retryUrl)
     }
 
-    private fun loadValidatedUrl(validatedUrl: String) {
-        lastValidatedUrl = validatedUrl
-        onValidatedUrlChanged(validatedUrl)
-        _uiState.value = SessionUiState.Loading(activeUrl = validatedUrl, popupOpen = popupOpen)
-        port.loadUri(validatedUrl)
-    }
+    private fun sendEffect(effect: UiEffect) { _effects.trySend(effect) }
 
     private fun recordUriValidationOutcome(branch: String) {
         emitSeam(
@@ -355,8 +383,6 @@ class RemoteSessionCoordinator(
     private fun emitSeam(
         level: TelemetryLevel, seamType: SeamType, eventName: String, ruleAc: String, attributes: Map<String, String>,
     ) = telemetry.recordEvent(level, "RemoteSessionCoordinator", seamType, eventName, ruleAc, attributes)
-
-    private fun isAccountsHost(url: String): Boolean = url.trim().lowercase().startsWith("https://accounts.google.com")
 
     internal fun setStateForTest(state: SessionUiState) {
         _uiState.value = state

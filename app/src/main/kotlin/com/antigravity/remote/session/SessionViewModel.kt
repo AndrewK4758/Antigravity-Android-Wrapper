@@ -7,8 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import com.antigravity.remote.AntigravityRemoteApp
 import com.antigravity.remote.policy.NavigationDecision
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.mozilla.geckoview.AllowOrDeny
@@ -49,12 +49,13 @@ class SessionViewModel(
     )
 
     val uiState: StateFlow<SessionUiState> = coordinator.uiState
-    val effects: SharedFlow<UiEffect> = coordinator.effects
+    val effects: Flow<UiEffect> = coordinator.effects
 
     fun initializeIfNeeded(intent: Intent?) {
-        if (startupDispatched && coordinator.uiState.value !is SessionUiState.Error) {
+        if (startupDispatched) {
             return
         }
+        startupDispatched = true
         val isActionView = intent?.action == Intent.ACTION_VIEW
         val intentUri = if (isActionView) intent.dataString else null
         val hasIntentData = isActionView && intent.data != null
@@ -66,7 +67,6 @@ class SessionViewModel(
             return
         }
         ensurePrimarySession(runtime)
-        startupDispatched = true
         coordinator.onStartup(runtimeError = null, initialIntentUri = intentUri, hasIntentData = hasIntentData)
     }
 
@@ -87,11 +87,10 @@ class SessionViewModel(
         val runtimeResult = app.ensureGeckoRuntime()
         val runtime = runtimeResult.getOrNull()
         if (runtime == null) {
-            coordinator.onStartup(runtimeResult.exceptionOrNull(), null, false)
+            coordinator.onRetry(runtimeResult.exceptionOrNull())
             return
         }
         ensurePrimarySession(runtime)
-        startupDispatched = true
         coordinator.onRetry()
     }
 
@@ -171,6 +170,10 @@ class SessionViewModel(
             error: WebRequestError,
         ): GeckoResult<String>? {
             if (session === displayTracker.primarySession()) {
+                if (displayTracker.pendingPopupSession() != null || displayTracker.currentDisplay() !== session) {
+                    closePopupSession()
+                    coordinator.onPopupClosed()
+                }
                 coordinator.onLoadError(uri ?: latestLocation, error.category, error.code)
             } else if (displayTracker.hasPopupSession(session)) {
                 closePopupSession()
@@ -223,7 +226,7 @@ class SessionViewModel(
         }
 
         override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
-            coordinator.onNavigationRequest(response.uri, isNewSession = false)
+            coordinator.onDownloadRequested(response.uri)
         }
 
         override fun onCrash(session: GeckoSession) = handleSessionTermination(session)
@@ -246,6 +249,7 @@ class SessionViewModel(
             return
         }
         closePopupSession()
+        coordinator.onPopupClosed()
         displayTracker.clearPrimary()?.close()
         _displaySession.value = displayTracker.currentDisplay()
         coordinator.onLoadError(latestLocation, -1, -1)

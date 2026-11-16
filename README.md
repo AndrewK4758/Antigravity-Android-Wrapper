@@ -8,11 +8,16 @@ Antigravity Remote Control authenticates through Google Account sign-in (`https:
 
 ## Target Environment
 
-- **Language / Build:** Kotlin + Gradle Kotlin DSL
-- **Android SDK:** Compile/Target SDK 37, Min SDK 33 (`platforms/android-37.0`)
-- **Embedded Engine:** `org.mozilla.geckoview:geckoview`
+- **Language / Build:** Kotlin + Gradle Kotlin DSL (`gradle-9.6.0-bin.zip`, AGP `9.4.0`, Java 17 bytecode)
+- **Android SDK:** Compile SDK `37.2` (`platforms/android-37.2`), Target SDK `37`, Min SDK `29` (Android 10 through Android 17 / Samsung One UI devices, `arm64-v8a` & `x86_64`)
+- **Embedded Engine:** `org.mozilla.geckoview:geckoview:160.0.20261104181552`
 - **Entry URL:** `https://antigravity.google.com` and `/r/<instance-id>` deep links
 
-## Repository Status
+## Build & Verify
 
-Repository initialized. Application module scaffolding and implementation will follow design and test planning.
+```bash
+export JAVA_HOME=/home/ak/.local/share/JetBrains/Toolbox/apps/android-studio/jbr
+export ANDROID_HOME=/home/ak/Android/Sdk
+./gradlew test assembleDebug lintDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
