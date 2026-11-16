@@ -200,6 +200,68 @@ class RemoteSessionCoordinatorTest {
         )
     }
 
+    @Test
+    fun s4_1_back_closes_active_popup_before_touching_primary_history() = runTest {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.setStateForTest(
+            SessionUiState.Active(
+                activeUrl = "https://antigravity.google.com/",
+                canGoBack = true,
+                popupOpen = true,
+            ),
+        )
+        val emittedEffects = mutableListOf<UiEffect>()
+        val collectJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { emittedEffects.add(it) }
+        }
+
+        coordinator.onBackPressed()
+
+        assertEquals(1, port.closePopupCount)
+        assertEquals(0, port.goBackCount)
+        assertEquals(
+            SessionUiState.Active(
+                activeUrl = "https://antigravity.google.com/",
+                canGoBack = true,
+                popupOpen = false,
+            ),
+            coordinator.uiState.value,
+        )
+        assertTrue(emittedEffects.none { it is UiEffect.CloseApp })
+        collectJob.cancel()
+    }
+
+    @Test
+    fun s4_2_back_unwinds_history_when_can_go_back_then_closes_app() = runTest {
+        val cases = listOf(
+            Triple(true, 1, false),
+            Triple(false, 0, true),
+        )
+        for ((canGoBack, expectedGoBackCalls, expectedCloseApp) in cases) {
+            val port = FakeBrowserSessionPort()
+            val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+            coordinator.setStateForTest(
+                SessionUiState.Active(activeUrl = "https://antigravity.google.com/", canGoBack = !canGoBack),
+            )
+            coordinator.onCanGoBackChanged(canGoBack)
+            val emittedEffects = mutableListOf<UiEffect>()
+            val collectJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+                coordinator.effects.collect { emittedEffects.add(it) }
+            }
+
+            coordinator.onBackPressed()
+
+            assertEquals("goBack mismatch for canGoBack=$canGoBack", expectedGoBackCalls, port.goBackCount)
+            assertEquals(
+                "CloseApp mismatch for canGoBack=$canGoBack",
+                expectedCloseApp,
+                emittedEffects.any { it is UiEffect.CloseApp },
+            )
+            collectJob.cancel()
+        }
+    }
+
     private class FakeBrowserSessionPort : BrowserSessionPort {
         val loadedUrls = mutableListOf<String>()
         var reloadCount = 0

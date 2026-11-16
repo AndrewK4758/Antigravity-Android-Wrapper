@@ -160,6 +160,37 @@ class RemoteSessionCoordinator(
         )
     }
 
+    fun onCanGoBackChanged(canGoBack: Boolean) {
+        this.canGoBack = canGoBack
+        val current = _uiState.value
+        if (current is SessionUiState.Active) {
+            _uiState.value = current.copy(canGoBack = canGoBack)
+        }
+    }
+
+    fun onBackPressed() {
+        if (popupOpen) {
+            port.closePopup()
+            onPopupClosed()
+            return
+        }
+        val current = _uiState.value
+        if (current !is SessionUiState.Error && canGoBack) {
+            port.goBack()
+            return
+        }
+        _effects.tryEmit(UiEffect.CloseApp)
+    }
+
+    fun onPopupClosed() {
+        popupOpen = false
+        _uiState.value = when (val current = _uiState.value) {
+            is SessionUiState.Loading -> current.copy(popupOpen = false)
+            is SessionUiState.Active -> current.copy(popupOpen = false)
+            else -> current
+        }
+    }
+
     private fun loadValidatedUrl(validatedUrl: String) {
         lastValidatedUrl = validatedUrl
         onValidatedUrlChanged(validatedUrl)
