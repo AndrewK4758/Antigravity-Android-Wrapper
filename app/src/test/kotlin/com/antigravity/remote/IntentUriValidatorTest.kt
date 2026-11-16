@@ -44,4 +44,15 @@ class IntentUriValidatorTest {
             assertFalse("Query secret leaked in redactedTarget for $rawUri", rejected.redactedTarget.contains("abc"))
         }
     }
+
+    @Test
+    fun s2_4_empty_or_null_uri_is_rejected_with_empty_reason() {
+        for (raw in listOf(null, "", "   ")) {
+            val result = IntentUriValidator.validateInboundUri(raw)
+            assertEquals(
+                UriValidationResult.Rejected(UriRejectionReason.EMPTY_URI, "<empty>"),
+                result,
+            )
+        }
+    }
 }
