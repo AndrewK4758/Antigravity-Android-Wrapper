@@ -1,6 +1,8 @@
 package com.antigravity.remote.session
 
 import com.antigravity.remote.policy.IntentUriValidator
+import com.antigravity.remote.policy.NavigationDecision
+import com.antigravity.remote.policy.NavigationOriginPolicy
 import com.antigravity.remote.policy.UriValidationResult
 import com.antigravity.remote.telemetry.SeamTelemetry
 import com.antigravity.remote.telemetry.SeamType
@@ -75,6 +77,36 @@ class RemoteSessionCoordinator(
                 )
             }
         }
+    }
+
+    fun onNavigationRequest(uri: String?, isNewSession: Boolean): NavigationDecision {
+        val decision = NavigationOriginPolicy.classify(uri, isNewSession)
+        telemetry.recordEvent(
+            level = TelemetryLevel.INFO,
+            component = "RemoteSessionCoordinator",
+            seamType = SeamType.RULE_DIVERGENCE,
+            eventName = "nav.policy.decision_distribution",
+            ruleAc = "AC-3,AC-6",
+            attributes = mapOf("branch_taken" to decision.name),
+        )
+        when (decision) {
+            NavigationDecision.ALLOW_POPUP_IN_HOST -> {
+                popupOpen = true
+                _uiState.value = when (val current = _uiState.value) {
+                    is SessionUiState.Loading -> current.copy(popupOpen = true)
+                    is SessionUiState.Active -> current.copy(popupOpen = true)
+                    else -> current
+                }
+            }
+            NavigationDecision.HAND_OFF_EXTERNAL -> {
+                val safeUrl = uri?.trim().orEmpty()
+                if (safeUrl.isNotEmpty()) {
+                    _effects.tryEmit(UiEffect.OpenExternalUrl(safeUrl))
+                }
+            }
+            NavigationDecision.ALLOW_IN_SESSION, NavigationDecision.BLOCK -> Unit
+        }
+        return decision
     }
 
     fun onLoadStarted(uri: String?) {

@@ -83,6 +83,58 @@ class RemoteSessionCoordinatorTest {
         collectJob.cancel()
     }
 
+    @Test
+    fun s3_2_popup_request_marks_popup_open_without_overwriting_primary_url() {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.setStateForTest(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/r/inst-1", canGoBack = false),
+        )
+
+        val decision = coordinator.onNavigationRequest(
+            uri = "https://accounts.google.com/o/oauth2/v2/auth",
+            isNewSession = true,
+        )
+
+        assertEquals(com.antigravity.remote.policy.NavigationDecision.ALLOW_POPUP_IN_HOST, decision)
+        assertEquals(
+            SessionUiState.Active(
+                activeUrl = "https://antigravity.google.com/r/inst-1",
+                canGoBack = false,
+                popupOpen = true,
+            ),
+            coordinator.uiState.value,
+        )
+    }
+
+    @Test
+    fun s3_3_s3_4_coordinator_hands_off_external_https_and_blocks_unsafe_schemes() = runTest {
+        val port = FakeBrowserSessionPort()
+        val coordinator = RemoteSessionCoordinator(port = port, telemetry = SeamTelemetry())
+        coordinator.setStateForTest(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/r/inst-1", canGoBack = false),
+        )
+        val emittedEffects = mutableListOf<UiEffect>()
+        val collectJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            coordinator.effects.collect { emittedEffects.add(it) }
+        }
+
+        val extDecision = coordinator.onNavigationRequest("https://docs.python.org/3/", isNewSession = false)
+        val blockDecision = coordinator.onNavigationRequest("intent://scan/#Intent;end", isNewSession = false)
+
+        assertEquals(com.antigravity.remote.policy.NavigationDecision.HAND_OFF_EXTERNAL, extDecision)
+        assertEquals(com.antigravity.remote.policy.NavigationDecision.BLOCK, blockDecision)
+        assertEquals(
+            listOf(UiEffect.OpenExternalUrl("https://docs.python.org/3/")),
+            emittedEffects,
+        )
+        assertEquals(
+            SessionUiState.Active(activeUrl = "https://antigravity.google.com/r/inst-1", canGoBack = false),
+            coordinator.uiState.value,
+        )
+        collectJob.cancel()
+    }
+
     private class FakeBrowserSessionPort : BrowserSessionPort {
         val loadedUrls = mutableListOf<String>()
         var reloadCount = 0

@@ -29,21 +29,21 @@ object NavigationOriginPolicy {
         val scheme = parsed.scheme?.lowercase() ?: return NavigationDecision.BLOCK
         val host = parsed.host?.lowercase()
         val authority = parsed.rawAuthority
-        if (
-            scheme == "https" &&
+        val validWebAuthority = (scheme == "https" || scheme == "http") &&
             !host.isNullOrEmpty() &&
             !authority.isNullOrEmpty() &&
             !authority.contains('@') &&
-            parsed.rawUserInfo == null &&
-            (parsed.port == -1 || parsed.port == 443) &&
-            host in allowlistedHosts
-        ) {
+            parsed.rawUserInfo == null
+        if (!validWebAuthority) {
+            return NavigationDecision.BLOCK
+        }
+        if (scheme == "https" && (parsed.port == -1 || parsed.port == 443) && host in allowlistedHosts) {
             return if (isNewSession) {
                 NavigationDecision.ALLOW_POPUP_IN_HOST
             } else {
                 NavigationDecision.ALLOW_IN_SESSION
             }
         }
-        return NavigationDecision.BLOCK
+        return NavigationDecision.HAND_OFF_EXTERNAL
     }
 }

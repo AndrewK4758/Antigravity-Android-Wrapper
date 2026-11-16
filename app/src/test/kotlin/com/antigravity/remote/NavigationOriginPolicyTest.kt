@@ -42,4 +42,42 @@ class NavigationOriginPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun s3_3_unrecognized_http_or_https_links_hand_off_externally() {
+        assertEquals(
+            NavigationDecision.HAND_OFF_EXTERNAL,
+            NavigationOriginPolicy.classify(
+                targetUri = "https://docs.python.org/3/",
+                isNewSession = false,
+            ),
+        )
+        assertEquals(
+            NavigationDecision.HAND_OFF_EXTERNAL,
+            NavigationOriginPolicy.classify(
+                targetUri = "http://example.com/guide",
+                isNewSession = true,
+            ),
+        )
+    }
+
+    @Test
+    fun s3_4_non_http_schemes_and_userinfo_links_are_blocked() {
+        val blocked = listOf(
+            "intent://scan/#Intent;end",
+            "javascript:void(0)",
+            "file:///etc/passwd",
+            "data:text/html,test",
+            "https://user@docs.python.org/3/",
+            "",
+            null,
+        )
+        for (uri in blocked) {
+            assertEquals(
+                "Expected BLOCK for $uri",
+                NavigationDecision.BLOCK,
+                NavigationOriginPolicy.classify(targetUri = uri, isNewSession = false),
+            )
+        }
+    }
 }
