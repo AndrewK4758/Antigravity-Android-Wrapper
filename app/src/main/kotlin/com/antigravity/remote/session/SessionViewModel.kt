@@ -3,6 +3,7 @@ package com.antigravity.remote.session
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import com.antigravity.remote.AntigravityRemoteApp
@@ -250,6 +251,7 @@ class SessionViewModel(
         }
         closePopupSession()
         coordinator.onPopupClosed()
+        coordinator.onSessionReset()
         displayTracker.clearPrimary()?.close()
         _displaySession.value = displayTracker.currentDisplay()
         coordinator.onLoadError(latestLocation, -1, -1)
@@ -264,12 +266,11 @@ class SessionViewModel(
         coordinator.onSessionReset()
         displayTracker.clearAll().forEach { it.close() }
         _displaySession.value = null
-        super.onCleared()
     }
 
     private inner class GeckoBrowserPort : BrowserSessionPort {
         override fun loadUri(url: String) {
-            val runtime = app.ensureGeckoRuntime().getOrNull() ?: return
+            val runtime = app.ensureGeckoRuntime().getOrThrow()
             ensurePrimarySession(runtime)
             displayTracker.primarySession()?.loadUri(url)
         }
@@ -293,7 +294,7 @@ class SessionViewModel(
                 if (prompt != null) result.complete(prompt.dismiss())
                 return
             }
-            val parsed = uris.map { Uri.parse(it) }
+            val parsed = uris.map { it.toUri() }
             val response = if (prompt.type == PromptDelegate.FilePrompt.Type.MULTIPLE) {
                 prompt.confirm(app, parsed.toTypedArray())
             } else {

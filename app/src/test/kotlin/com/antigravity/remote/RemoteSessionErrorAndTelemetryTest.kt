@@ -269,6 +269,29 @@ class RemoteSessionErrorAndTelemetryTest {
     }
 
     @Test
+    fun warm_valid_intent_while_runtime_unavailable_preserves_runtime_init_failed_error() {
+        val failingPort = object : RecordingBrowserSessionPort() {
+            override fun loadUri(url: String) {
+                throw UnsatisfiedLinkError("libxul.so missing")
+            }
+        }
+        val sink = RecordingTelemetrySink()
+        val coordinator = RemoteSessionCoordinator(port = failingPort, telemetry = SeamTelemetry(sink))
+        coordinator.onStartup(
+            runtimeError = UnsatisfiedLinkError("libxul.so missing"),
+            initialIntentUri = null,
+            hasIntentData = false,
+        )
+        val initialFaultCount = sink.events.count { it.eventName == "gecko.runtime.init_or_load_fault" }
+
+        coordinator.onWarmIntent("https://antigravity.google.com/r/inst-9", hasIntentData = true)
+
+        val err = coordinator.uiState.value as? SessionUiState.Error
+        assertEquals(SessionErrorKind.RUNTIME_INIT_FAILED, err?.kind)
+        assertEquals(initialFaultCount + 1, sink.events.count { it.eventName == "gecko.runtime.init_or_load_fault" })
+    }
+
+    @Test
     fun download_requests_delegate_external_urls_and_surface_notice_for_self_or_blob_uris() = runTest {
         val port = RecordingBrowserSessionPort()
         val sink = RecordingTelemetrySink()

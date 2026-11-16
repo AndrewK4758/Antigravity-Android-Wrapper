@@ -3,7 +3,6 @@ package com.antigravity.remote.ui
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Color
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,6 +16,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
@@ -184,7 +184,7 @@ class MainActivity : AppCompatActivity() {
         when (effect) {
             is UiEffect.OpenExternalUrl -> {
                 ExternalActivityRouter.launchExternalUrl(effect.url, viewModel.coordinator) { url ->
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
                 }
             }
             is UiEffect.LaunchDocumentPicker -> {

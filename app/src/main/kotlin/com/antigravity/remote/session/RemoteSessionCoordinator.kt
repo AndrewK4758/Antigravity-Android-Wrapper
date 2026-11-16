@@ -92,10 +92,7 @@ class RemoteSessionCoordinator(
     fun onNavigationRequest(uri: String?, isNewSession: Boolean): NavigationDecision {
         val decision = NavigationOriginPolicy.classify(uri, isNewSession)
         emitSeam(
-            TelemetryLevel.INFO,
-            SeamType.RULE_DIVERGENCE,
-            "nav.policy.decision_distribution",
-            "AC-3,AC-6",
+            TelemetryLevel.INFO, SeamType.RULE_DIVERGENCE, "nav.policy.decision_distribution", "AC-3,AC-6",
             mapOf("branch_taken" to decision.name),
         )
         when (decision) {
@@ -107,9 +104,8 @@ class RemoteSessionCoordinator(
                     else -> current
                 }
             }
-            NavigationDecision.HAND_OFF_EXTERNAL -> {
+            NavigationDecision.HAND_OFF_EXTERNAL ->
                 uri?.trim()?.takeIf { it.isNotEmpty() }?.let { sendEffect(UiEffect.OpenExternalUrl(it)) }
-            }
             NavigationDecision.ALLOW_IN_SESSION, NavigationDecision.BLOCK -> Unit
         }
         return decision
@@ -121,10 +117,7 @@ class RemoteSessionCoordinator(
             return
         }
         emitSeam(
-            TelemetryLevel.WARN,
-            SeamType.BOUNDARY_FAULT,
-            "download.response.unhandled",
-            "AC-6",
+            TelemetryLevel.WARN, SeamType.BOUNDARY_FAULT, "download.response.unhandled", "AC-6",
             mapOf("target" to IntentUriValidator.redactForLog(uri)),
         )
         sendEffect(UiEffect.ShowNonFatalNotice("Direct file download is not supported in this standalone session"))
@@ -137,17 +130,14 @@ class RemoteSessionCoordinator(
         if (candidate != null && NavigationOriginPolicy.isAccountsHost(candidate)) {
             consecutiveAuthRedirects++
             if (consecutiveAuthRedirects >= MAX_AUTH_REDIRECTS) {
-                emitSeam(
-                    TelemetryLevel.ERROR,
-                    SeamType.UNSOUND_CONDITION,
-                    "auth.session.context_diverged",
-                    "AC-3",
-                    mapOf(
-                        "precondition" to "Auth redirect sequence must converge",
-                        "expected_state" to "settled_antigravity_session",
-                        "actual_state" to "redirect_loop_$consecutiveAuthRedirects",
-                        "code_location" to "RemoteSessionCoordinator:onLoadStarted",
-                    ),
+                telemetry.recordUnsoundCondition(
+                    component = "RemoteSessionCoordinator",
+                    eventName = "auth.session.context_diverged",
+                    ruleAc = "AC-3",
+                    precondition = "Auth redirect sequence must converge",
+                    expectedState = "settled_antigravity_session",
+                    actualState = "redirect_loop_$consecutiveAuthRedirects",
+                    codeLocation = "RemoteSessionCoordinator:onLoadStarted",
                 )
                 closePopupIfOpen()
                 _uiState.value = SessionUiState.Error(
@@ -263,12 +253,9 @@ class RemoteSessionCoordinator(
         val existing = pendingFilePromptId ?: return
         pendingFilePromptId = null
         port.cancelFilePrompt(existing)
-        emitSeam(
-            TelemetryLevel.ERROR,
-            SeamType.DELTA_AUDIT_GAP,
-            "prompt.file.callback_orphaned",
-            "AC-6",
-            mapOf("gap_type" to "checkpoint_skipped", "request_id" to existing),
+        telemetry.recordDeltaAuditGap(
+            "RemoteSessionCoordinator", "prompt.file.callback_orphaned", "AC-6", "checkpoint_skipped",
+            mapOf("request_id" to existing),
         )
     }
 
@@ -279,19 +266,24 @@ class RemoteSessionCoordinator(
                 lastValidatedUrl = normalized
                 onValidatedUrlChanged(normalized)
                 _uiState.value = SessionUiState.Loading(activeUrl = normalized, popupOpen = popupOpen)
-                port.loadUri(normalized)
-                true
+                try {
+                    port.loadUri(normalized)
+                    true
+                } catch (t: Throwable) {
+                    reportRuntimeInitFailure(t)
+                    false
+                }
             }
             is UriValidationResult.Rejected -> {
-                emitSeam(
-                    TelemetryLevel.ERROR, SeamType.UNSOUND_CONDITION, "intent.uri.unvalidated_load_blocked", "AC-4",
-                    mapOf(
-                        "precondition" to "Only validated antigravity HTTPS URIs may enter primary loadUri",
-                        "expected_state" to "UriValidationResult.Valid",
-                        "actual_state" to validation.reason.name,
-                        "code_location" to "RemoteSessionCoordinator:loadUriGuarded",
-                        "target" to validation.redactedTarget,
-                    ),
+                telemetry.recordUnsoundCondition(
+                    component = "RemoteSessionCoordinator",
+                    eventName = "intent.uri.unvalidated_load_blocked",
+                    ruleAc = "AC-4",
+                    precondition = "Only validated antigravity HTTPS URIs may enter primary loadUri",
+                    expectedState = "UriValidationResult.Valid",
+                    actualState = validation.reason.name,
+                    codeLocation = "RemoteSessionCoordinator:loadUriGuarded",
+                    extra = mapOf("target" to validation.redactedTarget),
                 )
                 false
             }
@@ -300,10 +292,9 @@ class RemoteSessionCoordinator(
 
     fun verifySessionAttachedOnStart(hasAttachedSession: Boolean) {
         if (_uiState.value is SessionUiState.Active && !hasAttachedSession) {
-            emitSeam(
-                TelemetryLevel.ERROR, SeamType.DELTA_AUDIT_GAP,
-                "lifecycle.config.session_reattach_missing", "AC-5",
-                mapOf("expected_checkpoint" to "GeckoView.setSession", "gap_type" to "side_effect_missing"),
+            telemetry.recordDeltaAuditGap(
+                "RemoteSessionCoordinator", "lifecycle.config.session_reattach_missing", "AC-5", "side_effect_missing",
+                mapOf("expected_checkpoint" to "GeckoView.setSession"),
             )
         }
     }
@@ -363,9 +354,8 @@ class RemoteSessionCoordinator(
         val beforeCount = telemetry.emittedCount()
         emitSeam(TelemetryLevel.ERROR, SeamType.BOUNDARY_FAULT, "gecko.runtime.init_or_load_fault", "AC-7", attributes)
         if (telemetry.emittedCount() == beforeCount) {
-            emitSeam(
-                TelemetryLevel.ERROR, SeamType.DELTA_AUDIT_GAP,
-                "error.ui.diagnostic_missing", "AC-7", mapOf("gap_type" to "side_effect_missing"),
+            telemetry.recordDeltaAuditGap(
+                "RemoteSessionCoordinator", "error.ui.diagnostic_missing", "AC-7", "side_effect_missing",
             )
         }
         _uiState.value = SessionUiState.Error(kind = kind, message = message, retryUrl = retryUrl)

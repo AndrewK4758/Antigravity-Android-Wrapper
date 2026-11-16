@@ -132,6 +132,38 @@ class SeamTelemetry(
     fun ruleBranchCount(eventName: String, branchTaken: String): Long =
         ruleCounters["$eventName:$branchTaken"]?.get() ?: 0L
 
+    fun recordUnsoundCondition(
+        component: String,
+        eventName: String,
+        ruleAc: String,
+        precondition: String,
+        expectedState: String,
+        actualState: String,
+        codeLocation: String,
+        extra: Map<String, String> = emptyMap(),
+    ) {
+        val attrs = linkedMapOf(
+            "precondition" to precondition,
+            "expected_state" to expectedState,
+            "actual_state" to actualState,
+            "code_location" to codeLocation,
+        )
+        attrs.putAll(extra)
+        recordEvent(TelemetryLevel.ERROR, component, SeamType.UNSOUND_CONDITION, eventName, ruleAc, attrs)
+    }
+
+    fun recordDeltaAuditGap(
+        component: String,
+        eventName: String,
+        ruleAc: String,
+        gapType: String,
+        extra: Map<String, String> = emptyMap(),
+    ) {
+        val attrs = linkedMapOf("gap_type" to gapType)
+        attrs.putAll(extra)
+        recordEvent(TelemetryLevel.ERROR, component, SeamType.DELTA_AUDIT_GAP, eventName, ruleAc, attrs)
+    }
+
     private fun toJsonLine(event: SeamEvent): String {
         val fields = linkedMapOf(
             "timestamp" to event.timestamp,

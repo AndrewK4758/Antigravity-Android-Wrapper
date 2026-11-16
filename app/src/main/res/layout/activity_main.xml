@@ -2,25 +2,12 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root_container"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#0F1115">
+    android:layout_height="match_parent">
 
     <org.mozilla.geckoview.GeckoView
         android:id="@+id/gecko_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
-
-    <TextView
-        android:id="@+id/notice_banner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:layout_margin="12dp"
-        android:background="#E6242933"
-        android:padding="12dp"
-        android:textColor="#F1F5F9"
-        android:textSize="14sp"
-        android:visibility="gone" />
 
     <LinearLayout
         android:id="@+id/error_overlay"
@@ -57,5 +44,17 @@
             android:layout_marginTop="20dp"
             android:text="@string/retry_label" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/notice_banner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_margin="12dp"
+        android:background="#E6242933"
+        android:padding="12dp"
+        android:textColor="#F1F5F9"
+        android:textSize="14sp"
+        android:visibility="gone" />
 
 </FrameLayout>

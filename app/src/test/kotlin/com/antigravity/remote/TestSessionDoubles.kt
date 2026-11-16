@@ -4,7 +4,7 @@ import com.antigravity.remote.session.BrowserSessionPort
 import com.antigravity.remote.telemetry.SeamEvent
 import com.antigravity.remote.telemetry.SeamTelemetrySink
 
-class RecordingBrowserSessionPort : BrowserSessionPort {
+open class RecordingBrowserSessionPort : BrowserSessionPort {
     val loadedUrls = mutableListOf<String>()
     var reloadCount = 0
     var goBackCount = 0
@@ -12,7 +12,7 @@ class RecordingBrowserSessionPort : BrowserSessionPort {
     val completedPrompts = mutableListOf<Pair<String, List<String>>>()
     val cancelledPrompts = mutableListOf<String>()
 
-    override fun loadUri(url: String) {
+    open override fun loadUri(url: String) {
         loadedUrls.add(url)
     }
 
