@@ -16,7 +16,7 @@ class AntigravityRemoteApp : Application() {
     @Volatile
     private var geckoRuntime: GeckoRuntime? = null
 
-    fun profileDirectory(): File = File(filesDir, "mozilla")
+    fun profileDirectory(): File = resolveProfileDirectory(filesDir)
 
     fun ensureGeckoRuntime(): Result<GeckoRuntime> {
         geckoRuntime?.let { return Result.success(it) }
@@ -43,5 +43,11 @@ class AntigravityRemoteApp : Application() {
     fun requireRuntimeForSession(): GeckoRuntime {
         runtimeGuard.requireRuntimeInitializedForSession()
         return checkNotNull(geckoRuntime) { "GeckoRuntime unexpectedly null" }
+    }
+
+    companion object {
+        private const val PROFILE_DIR_NAME = "mozilla"
+
+        fun resolveProfileDirectory(filesDir: File): File = File(filesDir, PROFILE_DIR_NAME)
     }
 }
