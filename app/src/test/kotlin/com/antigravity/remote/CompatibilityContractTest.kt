@@ -45,9 +45,23 @@ class CompatibilityContractTest {
         assertTrue(manifest.contains("android:allowBackup=\"false\""))
     }
 
-    private fun resolveAppManifest(): File {
-        val cwd = File(System.getProperty("user.dir") ?: ".")
-        val moduleDir = if (File(cwd, "src/main").isDirectory) cwd else File(cwd, "app")
-        return File(moduleDir, "src/main/AndroidManifest.xml")
+    @Test
+    fun c3_supports_android_10_through_13_devices_and_display_cutout_insets() {
+        val moduleDir = resolveModuleDir()
+        val gradleConfig = File(moduleDir, "build.gradle.kts").readText()
+        assertTrue("minSdk must support Android 10+ devices (API 29)", gradleConfig.contains("minSdk = 29"))
+        assertTrue("targetSdk must remain 37", gradleConfig.contains("targetSdk = 37"))
+
+        val mainActivitySource = File(moduleDir, "src/main/kotlin/com/antigravity/remote/ui/MainActivity.kt").readText()
+        assertTrue("MainActivity must include displayCutout insets", mainActivitySource.contains("displayCutout()"))
+        assertTrue("MainActivity must configure dark system bar styles", mainActivitySource.contains("SystemBarStyle.dark"))
+        assertTrue("MainActivity must attach BasicSelectionActionDelegate", mainActivitySource.contains("BasicSelectionActionDelegate"))
     }
+
+    private fun resolveModuleDir(): File {
+        val cwd = File(System.getProperty("user.dir") ?: ".")
+        return if (File(cwd, "src/main").isDirectory) cwd else File(cwd, "app")
+    }
+
+    private fun resolveAppManifest(): File = File(resolveModuleDir(), "src/main/AndroidManifest.xml")
 }

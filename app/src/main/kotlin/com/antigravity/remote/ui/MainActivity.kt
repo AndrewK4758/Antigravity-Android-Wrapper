@@ -1,6 +1,7 @@
 package com.antigravity.remote.ui
 
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -10,6 +11,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -24,6 +26,7 @@ import com.antigravity.remote.session.SessionUiState
 import com.antigravity.remote.session.SessionViewModel
 import com.antigravity.remote.session.UiEffect
 import kotlinx.coroutines.launch
+import org.mozilla.geckoview.BasicSelectionActionDelegate
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 
@@ -58,17 +61,22 @@ class MainActivity : AppCompatActivity() {
         override fun currentAttachedSession(): GeckoSession? = geckoView.session
 
         override fun releaseAttachedSession() {
+            geckoView.session?.selectionActionDelegate = null
             geckoView.releaseSession()
         }
 
         override fun attachSession(session: GeckoSession) {
+            session.selectionActionDelegate = BasicSelectionActionDelegate(this@MainActivity, true)
             geckoView.setSession(session)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         setContentView(R.layout.activity_main)
 
         pendingPickerRequestId = savedInstanceState?.getString(KEY_PENDING_PICKER_REQUEST_ID)
@@ -81,7 +89,9 @@ class MainActivity : AppCompatActivity() {
         noticeBanner = findViewById(R.id.notice_banner)
 
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
-            val mask = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
+            val mask = WindowInsetsCompat.Type.systemBars() or
+                WindowInsetsCompat.Type.displayCutout() or
+                WindowInsetsCompat.Type.ime()
             val barsAndIme = insets.getInsets(mask)
             view.setPadding(barsAndIme.left, barsAndIme.top, barsAndIme.right, barsAndIme.bottom)
             insets
