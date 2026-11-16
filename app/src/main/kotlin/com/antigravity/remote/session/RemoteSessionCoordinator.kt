@@ -303,6 +303,10 @@ class RemoteSessionCoordinator(
         }
     }
 
+    fun emitNotice(message: String) {
+        _effects.tryEmit(UiEffect.ShowNonFatalNotice(message))
+    }
+
     fun pendingFilePromptRequestId(): String? = pendingFilePromptId
 
     private fun resolveAllowlistedActiveUrl(candidate: String?, current: SessionUiState, persistValidated: Boolean): String {
